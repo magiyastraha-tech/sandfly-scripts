@@ -15,10 +15,10 @@ local manifest = {
   id = 'wam.tele2-summary',
   name = 'Теле2: сводка по счёту',
   author = 'Лия, WAM Agents',
-  version = '1.4',
+  version = '1.5',
   minApiVersion = 2,
   testedApiVersion = 3,
-  description = 'Читает номер, баланс, остатки гигабайт, минут и SMS, тариф и услуги одной командой. Собирает верхний ряд и блок с остатками в короткие пункты с действиями, называет вкладки коротко, пропускает рекламный баннер. При входе в приложение фокус сам встаёт на блок с номером. Остатки во всех пунктах читаются одинаково: подписи экрана, затем снимок, затем честное «не озвучивает».',
+  description = 'Читает номер, баланс, остатки гигабайт, минут и SMS, тариф и услуги одной командой. Собирает верхний ряд и блок с остатками в короткие пункты с действиями, называет вкладки коротко, пропускает рекламный баннер. При каждом входе в приложение фокус всегда встаёт на блок с номером. Остатки во всех пунктах читаются одинаково: подписи экрана, затем снимок, затем честное «не озвучивает».',
   apps = { 'ru.tele2.mytele2' },
   permissions = { 'screen', 'speech', 'input', 'actions' },
   settings = {
@@ -348,7 +348,9 @@ end
 
 local focusGen = 0
 
-local function focusPhoneBlock()
+-- force = true — вход в приложение: ставим фокус на блок с номером всегда,
+-- где бы фокус ни остался с прошлого раза.
+local function focusPhoneBlock(force)
   if sf.settings.get('focusPhone') == false then
     return
   end
@@ -361,9 +363,9 @@ local function focusPhoneBlock()
       return
     end
     local cur = sf.screen.focused()
-    -- Перебиваем фокус, только пока он на верхнем ряду или его ещё нет:
+    -- Смена окна фокуса не отбирает, пока он на верхнем ряду или его ещё нет:
     -- если человек уже листает экран, назад не дёргаем.
-    if cur and not isTopRow(cur) then
+    if not force and cur and not isTopRow(cur) then
       return
     end
     block:focus()
@@ -371,11 +373,11 @@ local function focusPhoneBlock()
 end
 
 sf.onAppEnter(function()
-  focusPhoneBlock()
+  focusPhoneBlock(true)
 end)
 
 sf.onWindowChange(function()
-  focusPhoneBlock()
+  focusPhoneBlock(false)
 end)
 
 -- Ручной переход: SandFly → Команды → «Перейти к блоку с номером».
