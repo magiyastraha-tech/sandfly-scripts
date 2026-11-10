@@ -5,13 +5,23 @@ local manifest = {
   id = 'ymusic.video_rows',
   name = 'YMusic: название и время',
   author = 'Алёшка',
-  version = '1.1',
+  version = '1.2',
   minApiVersion = 1,
   testedApiVersion = 4,
-  description = 'В списках видео строка читает только название и время. Канал, просмотры, дата публикации и кнопка «Ещё» переезжают в меню действий.',
+  description = 'В списках видео строка читает только название и время. Канал, просмотры, дата публикации и кнопка «Ещё» переезжают в меню действий. При запуске фокус сам встаёт на раздел «Новые».',
   apps = { 'io.ymusic.android' },
   permissions = { 'screen', 'speech', 'input', 'actions' },
+  commands = {
+    { id = 'focus_new', title = 'Перейти к разделу «Новые»', menu = true },
+  },
   settings = {
+    {
+      key = 'focusNew',
+      type = 'switch',
+      title = 'Фокус на «Новые»',
+      summary = 'При входе в приложение фокус встаёт на раздел «Новые»',
+      default = true,
+    },
     {
       key = 'shorten',
       type = 'switch',
@@ -178,4 +188,57 @@ sf.onActions(function(item)
   }
 
   return actions
+end)
+
+-- ── Фокус на разделе «Новые» ──
+
+-- Заголовок раздела «Новые» на экране подписок. Разметку списка
+-- приложение строит не сразу, поэтому ждём: до 15 секунд при запуске
+-- ищем именно заголовок, потом на всякий случай — любой текст «Новые».
+local function findNewHeading(timeout)
+  local heading = sf.screen.waitFor({ text = 'Новые', heading = true }, timeout or 15000, 300)
+  if not heading then
+    heading = sf.screen.waitFor({ text = 'Новые' }, 1500, 300)
+  end
+  return heading
+end
+
+-- Не перебиваем фокус, если человек уже ушёл в список видео.
+local function focusIsInList()
+  local cur = sf.screen.focused()
+  if not cur then return false end
+  return parseVideoRow(cur.text) ~= nil
+end
+
+local focusGen = 0
+
+local function focusNewSection()
+  if sf.settings.get('focusNew') == false then return end
+  focusGen = focusGen + 1
+  local mine = focusGen
+  sf.run(function()
+    local heading = findNewHeading(15000)
+    -- Пока ждали, экран сменился ещё раз — работает более поздний вызов.
+    if not heading or mine ~= focusGen then return end
+    if focusIsInList() then return end
+    heading:focus()
+  end)
+end
+
+sf.onAppEnter(function()
+  focusNewSection()
+end)
+
+sf.onWindowChange(function()
+  focusNewSection()
+end)
+
+-- Ручной переход: SandFly → Команды → «Перейти к разделу «Новые»».
+sf.onCommand('focus_new', function()
+  local heading = findNewHeading(3000)
+  if heading then
+    heading:focus()
+  else
+    sf.speak('Раздел «Новые» не найден')
+  end
 end)
