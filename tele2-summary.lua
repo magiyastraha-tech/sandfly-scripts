@@ -8,16 +8,17 @@
 --     переключение между ними — через меню действий;
 --   * блок с номером и остатками тоже сводит в один пункт: в меню действий
 --     «Пополнить баланс», «Гигабайты», «Минуты», «SMS»;
---   * рекламный баннер пропускает при листании.
+--   * рекламный баннер пропускает при листании;
+--   * при входе в приложение фокус сам встаёт на блок с номером.
 
 local manifest = {
   id = 'wam.tele2-summary',
   name = 'Теле2: сводка по счёту',
   author = 'Лия, WAM Agents',
-  version = '1.3',
+  version = '1.4',
   minApiVersion = 2,
   testedApiVersion = 3,
-  description = 'Читает номер, баланс, остатки гигабайт, минут и SMS, тариф и услуги одной командой. Собирает верхний ряд и блок с остатками в короткие пункты с действиями, называет вкладки коротко, пропускает рекламный баннер. Остатки во всех пунктах читаются одинаково: подписи экрана, затем снимок, затем честное «не озвучивает».',
+  description = 'Читает номер, баланс, остатки гигабайт, минут и SMS, тариф и услуги одной командой. Собирает верхний ряд и блок с остатками в короткие пункты с действиями, называет вкладки коротко, пропускает рекламный баннер. При входе в приложение фокус сам встаёт на блок с номером. Остатки во всех пунктах читаются одинаково: подписи экрана, затем снимок, затем честное «не озвучивает».',
   apps = { 'ru.tele2.mytele2' },
   permissions = { 'screen', 'speech', 'input', 'actions' },
   settings = {
@@ -26,6 +27,13 @@ local manifest = {
       type = 'switch',
       title = 'Распознавать цифры по картинке',
       summary = 'Для остатка гигабайт, которого приложение не отдаёт диктору. Добавляет около секунды.',
+      default = true,
+    },
+    {
+      key = 'focusPhone',
+      type = 'switch',
+      title = 'Фокус на блок с номером',
+      summary = 'При входе в приложение фокус встаёт на блок с номером и остатками',
       default = true,
     },
   },
@@ -65,6 +73,7 @@ local manifest = {
   },
   commands = {
     { id = 'summary', title = 'Сводка по счёту', keys = 'sf+s', menu = true },
+    { id = 'focus_phone', title = 'Перейти к блоку с номером', menu = true },
   },
 }
 
@@ -316,4 +325,65 @@ sf.onCommand('summary', function()
   end
 
   sf.speak(table.concat(parts, '. '), { interrupt = true })
+end)
+
+-- ── Фокус на блоке с номером ──
+
+local PHONE_QUERY = { textContains = 'Мой номер' }
+
+-- Верхний ряд (профиль, уведомления, поиск) после схлопывания — один пункт.
+-- Всё, что ниже него, считаем экраном, по которому человек уже пошёл.
+local function isTopRow(item)
+  local text = textOf(item)
+  if not text then
+    return true
+  end
+  if text:find('Мой номер', 1, true) then
+    return false
+  end
+  return text:find('Личный кабинет', 1, true) ~= nil
+    or text:find('Уведомления', 1, true) ~= nil
+    or text:find('Поиск', 1, true) ~= nil
+end
+
+local focusGen = 0
+
+local function focusPhoneBlock()
+  if sf.settings.get('focusPhone') == false then
+    return
+  end
+  focusGen = focusGen + 1
+  local mine = focusGen
+  sf.run(function()
+    local block = sf.screen.waitFor(PHONE_QUERY, 12000, 300)
+    -- Пока ждали, экран сменился ещё раз — работает более поздний вызов.
+    if not block or mine ~= focusGen then
+      return
+    end
+    local cur = sf.screen.focused()
+    -- Перебиваем фокус, только пока он на верхнем ряду или его ещё нет:
+    -- если человек уже листает экран, назад не дёргаем.
+    if cur and not isTopRow(cur) then
+      return
+    end
+    block:focus()
+  end)
+end
+
+sf.onAppEnter(function()
+  focusPhoneBlock()
+end)
+
+sf.onWindowChange(function()
+  focusPhoneBlock()
+end)
+
+-- Ручной переход: SandFly → Команды → «Перейти к блоку с номером».
+sf.onCommand('focus_phone', function()
+  local block = sf.screen.waitFor(PHONE_QUERY, 3000, 200)
+  if block then
+    block:focus()
+  else
+    sf.speak('Блок с номером не найден. Он есть на главном экране приложения.')
+  end
 end)
