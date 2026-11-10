@@ -5,7 +5,7 @@ local manifest = {
   id = 'ymusic.video_rows',
   name = 'YMusic: название и время',
   author = 'Алёшка',
-  version = '1.0',
+  version = '1.1',
   minApiVersion = 1,
   testedApiVersion = 4,
   description = 'В списках видео строка читает только название и время. Канал, просмотры, дата публикации и кнопка «Ещё» переезжают в меню действий.',
@@ -33,13 +33,12 @@ local manifest = {
   },
   rules = {
     -- Кнопку «Ещё» внутри строки видео прячем: она уходит в меню действий.
+    -- Только match, без id: id вместе с match требует совпадения и по id, и по запросу.
     {
-      id = 'ymusic_row_more_ru',
       match = { className = 'Button', contentDescription = 'Ещё', inside = { textContains = 'Видео' } },
       hide = true,
     },
     {
-      id = 'ymusic_row_more_en',
       match = { className = 'Button', contentDescription = 'More', inside = { textContains = 'Video' } },
       hide = true,
     },
