@@ -5,10 +5,10 @@ local manifest = {
   id = 'ymusic.video_rows',
   name = 'YMusic: название и время',
   author = 'Алёшка',
-  version = '1.2',
+  version = '1.3',
   minApiVersion = 1,
   testedApiVersion = 4,
-  description = 'В списках видео строка читает только название и время. Канал, просмотры, дата публикации и кнопка «Ещё» переезжают в меню действий. При запуске фокус сам встаёт на раздел «Новые».',
+  description = 'В списках видео строка читает только название и время. Канал, просмотры, дата публикации и кнопка «Ещё» переезжают в меню действий. При каждом входе в приложение фокус всегда встаёт на раздел «Новые».',
   apps = { 'io.ymusic.android' },
   permissions = { 'screen', 'speech', 'input', 'actions' },
   commands = {
@@ -212,7 +212,9 @@ end
 
 local focusGen = 0
 
-local function focusNewSection()
+-- force = true — вход в приложение: ставим фокус на «Новые» всегда,
+-- даже если фокус остался на строке видео с прошлого раза.
+local function focusNewSection(force)
   if sf.settings.get('focusNew') == false then return end
   focusGen = focusGen + 1
   local mine = focusGen
@@ -220,17 +222,19 @@ local function focusNewSection()
     local heading = findNewHeading(15000)
     -- Пока ждали, экран сменился ещё раз — работает более поздний вызов.
     if not heading or mine ~= focusGen then return end
-    if focusIsInList() then return end
+    -- Смена окна фокуса не отбирает: если человек уже листает список видео,
+    -- оставляем его там, где он есть.
+    if not force and focusIsInList() then return end
     heading:focus()
   end)
 end
 
 sf.onAppEnter(function()
-  focusNewSection()
+  focusNewSection(true)
 end)
 
 sf.onWindowChange(function()
-  focusNewSection()
+  focusNewSection(false)
 end)
 
 -- Ручной переход: SandFly → Команды → «Перейти к разделу «Новые»».
