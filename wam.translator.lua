@@ -1,7 +1,7 @@
 local manifest = {
   id = 'wam.translator',
   name = 'Переводчик',
-  version = '2.1',
+  version = '2.2',
   author = 'Slonobass',
   minApiVersion = 4,
   testedApiVersion = 4,
@@ -328,6 +328,19 @@ local function moveFavorite(code, delta, form)
   sf.speak((delta < 0 and 'Выше: ' or 'Ниже: ') .. NAME[code])
 end
 
+-- Использованный язык поднимается первым в избранном: до частого языка один удар.
+-- Если языка в избранном нет, порядок не трогаем.
+local function promoteFavorite(code)
+  local list, at = favorites(), nil
+  for i, item in ipairs(list) do
+    if item == code then at = i break end
+  end
+  if not at or at == 1 then return end
+  table.remove(list, at)
+  table.insert(list, 1, code)
+  saveFavorites(list)
+end
+
 -- Окно со всеми языками: поиск сверху, список ниже. Двойной удар по языку
 -- сразу переводит на него, а в меню действий у каждой строки — «Добавить в избранное».
 local function openAllLanguages(onPick)
@@ -505,6 +518,7 @@ sf.onCommand('translate', function()
   if not text or text == '' then return end
 
   openFavorites(function(code)
+    promoteFavorite(code)
     local name = NAME[code] or code
 
     sf.speak('Перевод: ' .. name)
