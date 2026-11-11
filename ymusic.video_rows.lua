@@ -5,10 +5,10 @@ local manifest = {
   id = 'ymusic.video_rows',
   name = 'YMusic: название и время',
   author = 'Алёшка',
-  version = '1.4',
+  version = '1.5',
   minApiVersion = 1,
   testedApiVersion = 4,
-  description = 'В списках видео строка читает только название и время. Канал, просмотры, дата публикации и кнопка «Ещё» переезжают в меню действий. При каждом входе в приложение фокус всегда встаёт на раздел «Новые».',
+  description = 'В списках видео строка читает только название и время. Канал, просмотры, дата публикации и кнопка «Ещё» переезжают в меню действий. При входе в приложение и при каждом открытии вкладки «Подписки» фокус всегда встаёт на раздел «Новые».',
   apps = { 'io.ymusic.android' },
   permissions = { 'screen', 'speech', 'input', 'actions' },
   commands = {
@@ -195,10 +195,13 @@ end)
 -- Заголовок раздела «Новые» на экране подписок. Разметку списка
 -- приложение строит не сразу, поэтому ждём: до 15 секунд при запуске
 -- ищем именно заголовок, потом на всякий случай — любой текст «Новые».
+local NEW_HEADING = { text = 'Новые', heading = true }
+local NEW_ANY = { text = 'Новые' }
+
 local function findNewHeading(timeout)
-  local heading = sf.screen.waitFor({ text = 'Новые', heading = true }, timeout or 15000, 300)
+  local heading = sf.screen.waitFor(NEW_HEADING, timeout or 15000, 300)
   if not heading then
-    heading = sf.screen.waitFor({ text = 'Новые' }, 1500, 300)
+    heading = sf.screen.waitFor(NEW_ANY, 1500, 300)
   end
   return heading
 end
@@ -210,18 +213,26 @@ local function focusIsInList()
   return parseVideoRow(cur.text) ~= nil
 end
 
+-- Фокус уже стоит на заголовке — второй раз не дёргаем.
+local function focusIsOnHeading()
+  local cur = sf.screen.focused()
+  return cur ~= nil and cur.text == 'Новые'
+end
+
 local focusGen = 0
 
--- force = true — вход в приложение: ставим фокус на «Новые» всегда,
--- даже если фокус остался на строке видео с прошлого раза.
+-- Ставит фокус на заголовок «Новые».
+-- force = true — вход в приложение: ставим фокус всегда, даже если он
+-- остался на строке видео с прошлого раза.
 local function focusNewSection(force)
   if sf.settings.get('focusNew') == false then return end
   focusGen = focusGen + 1
   local mine = focusGen
   sf.run(function()
-    local heading = findNewHeading(15000)
+    local heading = findNewHeading(force and 15000 or 6000)
     -- Пока ждали, экран сменился ещё раз — работает более поздний вызов.
     if not heading or mine ~= focusGen then return end
+    if focusIsOnHeading() then return end
     -- Смена окна фокуса не отбирает: если человек уже листает список видео,
     -- оставляем его там, где он есть.
     if not force and focusIsInList() then return end
@@ -236,6 +247,55 @@ end)
 sf.onWindowChange(function()
   focusNewSection(false)
 end)
+
+-- Вкладка «Подписки»: после переключения на неё фокус всегда на «Новые».
+-- Ловим нажатие по самой вкладке, а потом убеждаемся, что на экране правда
+-- есть раздел «Новые»: если фокус ушёл на другую вкладку, ничего не трогаем.
+-- Название проверяем с ограничением длины: общий контейнер нижней панели,
+-- в подписи которого перечислены все вкладки, так не совпадёт.
+if sf.onClick then
+  sf.onClick(function(event)
+    if sf.settings.get('focusNew') == false then return end
+    local node = event and event.node
+    local label = node and (node.text or node.contentDescription) or ''
+    if label == '' or #label > 40 then return end
+    -- string.lower в Lua не трогает кириллицу, поэтому проверяем оба варианта.
+    if not label:find('Подписк', 1, true) and not label:find('подписк', 1, true) then
+      return
+    end
+    sf.run(function()
+      local heading = sf.screen.waitFor(NEW_ANY, 5000, 300)
+      if heading and not focusIsOnHeading() then
+        heading:focus()
+      end
+    end)
+  end)
+end
+
+-- Следим, когда заголовок «Новые» появляется на экране: открыли вкладку
+-- «Подписки» из другой вкладки, приложение вернулось в раздел и так далее.
+-- Раньше его не было, теперь есть — переводим фокус. Если он просто
+-- уехал из видимой части списка, фокус не отбираем: он на строке видео.
+local headingShown = false
+local checkScheduled = false
+
+local function scheduleHeadingCheck()
+  if checkScheduled then return end
+  checkScheduled = true
+  sf.setTimeout(function()
+    checkScheduled = false
+    local heading = sf.screen.find(NEW_HEADING) or sf.screen.find(NEW_ANY)
+    if not heading then
+      headingShown = false
+      return
+    end
+    if headingShown then return end
+    headingShown = true
+    focusNewSection(false)
+  end, 500)
+end
+
+sf.onContentChange(scheduleHeadingCheck)
 
 -- Ручной переход: SandFly → Команды → «Перейти к разделу «Новые»».
 sf.onCommand('focus_new', function()
