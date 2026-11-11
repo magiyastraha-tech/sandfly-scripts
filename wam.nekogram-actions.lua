@@ -28,6 +28,12 @@
 -- в английском — Open Voice Transcription / Show transcript. Поэтому ищем по
 -- обрывку слова, а не по точному тексту.
 --
+-- Версия 1.4: команда «Голосовое: записать или отправить» на жест двумя
+-- пальцами дважды. Первый жест начинает запись и удерживает её: палец на
+-- микрофоне ведут вверх, до замка, — так запись продолжается после того, как
+-- палец отпущен. Второй жест находит появившуюся кнопку отправки и нажимает её.
+-- Если кнопки записи не нашлось, команда говорит об этом вслух, а не молчит.
+--
 -- Версия 1.3: заголовок в дереве есть, но сам он не фокусируемый — фокус
 -- ставится на TextView внутри него. Попытка в чате теперь одна: скрипт
 -- пробует до трёх раз за первый заход (пока чат дорисовывается), а потом в
@@ -52,16 +58,22 @@
 local manifest = {
   id = 'wam.nekogram-actions',
   name = 'Nekogram: кнопки сообщений в Actions',
-  version = '1.3',
+  version = '1.4',
   author = 'Алёшка',
   minApiVersion = 2,
   testedApiVersion = 4,
-  description = 'Убирает «Поделиться» и кнопку расшифровки из свайпа по сообщениям Nekogram и добавляет их в Actions сообщения. При открытии приложения фокус встаёт на список чатов, а при входе в чат — на заголовок «Непрочитанные сообщения».',
+  description = 'Убирает «Поделиться» и кнопку расшифровки из свайпа по сообщениям Nekogram и добавляет их в Actions сообщения. При открытии приложения фокус встаёт на список чатов, а при входе в чат — на заголовок «Непрочитанные сообщения». Жест «два пальца, дважды» записывает голосовое сообщение, он же его отправляет.',
   apps = { 'tw.nekomimi.nekogram' },
   permissions = { 'screen', 'speech', 'actions', 'input' },
   commands = {
     { id = 'focus_chats', title = 'Перейти к списку чатов', menu = true },
     { id = 'focus_unread', title = 'Перейти к непрочитанным', menu = true },
+    {
+      id = 'voice_toggle',
+      title = 'Голосовое: записать или отправить',
+      gesture = 'twoFingerDoubleTap',
+      menu = true,
+    },
   },
   settings = {
     {
@@ -473,6 +485,96 @@ sf.onCommand('focus_unread', function()
   sf.speak('Заголовок непрочитанных не берёт фокус')
 end)
 
+-- ── Голосовое сообщение по жесту ──
+
+-- Микрофон в поле ввода: пока поле пустое, там кнопка записи.
+local MIC_QUERIES = {
+  { contentDescription = 'Голосовое сообщение' },
+  { contentDescription = 'Записать голосовое сообщение' },
+  { contentDescription = 'Voice message' },
+  { contentDescription = 'Record voice message' },
+  { textContains = 'олосовое сообщение' },
+  { textContains = 'oice message' },
+}
+
+-- Отправка появляется на месте микрофона, как только запись началась.
+local SEND_QUERIES = {
+  { contentDescription = 'Отправить' },
+  { contentDescription = 'Send' },
+  { contentDescription = 'Отправить голосовое сообщение' },
+}
+
+local function findAny(queries)
+  for _, query in ipairs(queries) do
+    local item = sf.screen.find(query)
+    if item and item.visible ~= false then
+      return item
+    end
+  end
+  return nil
+end
+
+local function waitAny(queries, timeout)
+  for _, query in ipairs(queries) do
+    local item = sf.screen.waitFor(query, timeout, 200)
+    if item then
+      return item
+    end
+  end
+  return nil
+end
+
+-- Запись в Telegram начинается с нажатия на микрофон, а чтобы палец можно
+-- было отпустить и запись продолжалась, палец ведут вверх до замка. Здесь то
+-- же самое одним касанием: пауза на микрофоне и подъём вверх.
+local function startRecording(mic)
+  local b = mic.bounds
+  if not b then
+    return false
+  end
+  local x = math.floor((b.left + b.right) / 2)
+  local y = math.floor((b.top + b.bottom) / 2)
+  local up = (b.bottom - b.top) * 4
+  if y - up < 80 then
+    up = y - 80
+  end
+  if up < 40 then
+    return false
+  end
+  return sf.touch.gesture({
+    {
+      points = { { x = x, y = y }, { x = x, y = y - up } },
+      start = 0,
+      duration = 900,
+    },
+  })
+end
+
+-- Одно и то же сочетание: запись не идёт — начать её, идёт — отправить.
+sf.onCommand('voice_toggle', function()
+  local mic = findAny(MIC_QUERIES)
+  if mic then
+    if not startRecording(mic) then
+      sf.speak('Не получилось начать запись')
+      return
+    end
+    -- Замок срабатывает не всегда: если отправки не появилось, запись уже
+    -- ушла коротким сообщением либо не началась.
+    if not waitAny(SEND_QUERIES, 2500) then
+      sf.speak('Запись не началась')
+    end
+    return
+  end
+
+  local send = findAny(SEND_QUERIES)
+  if send then
+    send:click()
+    return
+  end
+
+  sf.speak('Кнопка записи не найдена')
+end)
+
 -- Ручной переход: SandFly → Команды → «Перейти к списку чатов».
 sf.onCommand('focus_chats', function()
   local list = findMainList(3000)
@@ -488,4 +590,4 @@ sf.onCommand('focus_chats', function()
   end
 end)
 
-print('Nekogram: кнопки сообщений в Actions, версия 1.3 загружена')
+print('Nekogram: кнопки сообщений в Actions, версия 1.4 загружена')
