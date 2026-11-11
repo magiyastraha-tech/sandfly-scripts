@@ -1,11 +1,11 @@
 local manifest = {
   id = 'wam.translator',
   name = 'Переводчик',
-  version = '1.2',
+  version = '2.0',
   author = 'Slonobass',
   minApiVersion = 4,
   testedApiVersion = 4,
-  description = 'Переводит текст в фокусе на любой язык из списка переводчика. Через меню команд → выбор языка → перевод в окне либо прямо в поле ввода.',
+  description = 'Переводит текст в фокусе на любой язык из списка переводчика. Через меню команд → избранные языки или все языки с поиском → перевод в окне либо прямо в поле ввода.',
   permissions = { 'input', 'screen', 'actions', 'speech', 'dialogs', 'network', 'clipboard' },
   settings = {
     { key = 'replace', type = 'switch', title = 'Вставлять перевод обратно в поле ввода', default = true },
@@ -169,13 +169,6 @@ for line in LANGUAGES:gmatch('[^\r\n]+') do
 end
 table.sort(ALL, function(a, b) return sortKey(a.name) < sortKey(b.name) end)
 
--- Короткий список для быстрого выбора; всё остальное — за пунктом «Все языки».
-local POPULAR = {
-  'en', 'kk', 'uk', 'de', 'fr', 'es', 'it',
-  'zh-Hans', 'ja', 'tr', 'pl', 'ar', 'be',
-  'uz', 'ka', 'hy', 'he', 'hi',
-}
-
 -- Лимит одного запроса к службе перевода — 5000 символов, берём с запасом.
 local MAX_CHARS = 4500
 
@@ -223,53 +216,203 @@ local function translate(text, code)
   return table.concat(parts, '\n')
 end
 
-local function remember(code)
-  sf.storage.set('last', code)
-  local recent = sf.storage.get('recent', {})
-  if type(recent) ~= 'table' then recent = {} end
-  local nextRecent = { code }
-  for _, item in ipairs(recent) do
-    if item ~= code and #nextRecent < 4 then nextRecent[#nextRecent + 1] = item end
+-- ── Избранные языки ──
+
+local FAVORITES_KEY = 'favorites'
+
+-- Избранное — список кодов в том порядке, в каком языки стоят в окне.
+-- По умолчанию список пуст: человек сам наполняет его из полного списка.
+local function favorites()
+  local saved = sf.storage.get(FAVORITES_KEY, {})
+  if type(saved) ~= 'table' then return {} end
+  local list = {}
+  for _, code in ipairs(saved) do
+    if type(code) == 'string' and NAME[code] then list[#list + 1] = code end
   end
-  sf.storage.set('recent', nextRecent)
+  return list
 end
 
-local function chooseLanguage()
-  local last = sf.storage.get('last')
-  local options, seen = {}, {}
+local function saveFavorites(list)
+  sf.storage.set(FAVORITES_KEY, list)
+end
 
-  local function add(code)
-    if code and NAME[code] and not seen[code] then
-      seen[code] = true
-      options[#options + 1] = { value = code, label = NAME[code] }
+local function isFavorite(code)
+  for _, item in ipairs(favorites()) do
+    if item == code then return true end
+  end
+  return false
+end
+
+local function favoriteRows()
+  local rows = {}
+  for _, code in ipairs(favorites()) do
+    rows[#rows + 1] = { value = code, label = NAME[code] }
+  end
+  return rows
+end
+
+-- string.lower в Lua не трогает кириллицу, а поиск не должен зависеть от регистра.
+local CYRILLIC_LOWER = {}
+for cp = 0x0410, 0x042F do
+  CYRILLIC_LOWER[utf8.char(cp)] = utf8.char(cp + 0x20)
+end
+CYRILLIC_LOWER[utf8.char(0x0401)] = utf8.char(0x0451)
+
+local function lower(s)
+  s = string.lower(s)
+  return (s:gsub('[%z\1-\127\194-\244][\128-\191]*', function(ch)
+    return CYRILLIC_LOWER[ch] or ch
+  end))
+end
+
+-- Полный список: поиск идёт и по названию языка, и по его коду.
+local function languageRows(query)
+  local needle = lower(trim(query or ''))
+  local rows = {}
+  for _, entry in ipairs(ALL) do
+    if needle == ''
+      or lower(entry.name):find(needle, 1, true)
+      or lower(entry.code):find(needle, 1, true) then
+      rows[#rows + 1] = { value = entry.code, label = entry.name }
     end
   end
+  return rows
+end
 
-  local recent = sf.storage.get('recent', {})
-  if type(recent) == 'table' then
-    for _, code in ipairs(recent) do add(code) end
+local favoritesWindow = nil
+
+local function refreshFavorites()
+  if not favoritesWindow then return end
+  pcall(favoritesWindow.set, favoritesWindow, 'favorites', { items = favoriteRows() })
+end
+
+local function addFavorite(code)
+  local name = NAME[code]
+  if not name then return end
+  if isFavorite(code) then
+    sf.speak('Уже в избранном: ' .. name)
+    return
   end
-  for _, code in ipairs(POPULAR) do add(code) end
-  options[#options + 1] = { value = '$all', label = 'Все языки (' .. #ALL .. ')…' }
-  options[#options + 1] = { value = '$manual', label = 'Ввести код языка вручную…' }
+  local list = favorites()
+  list[#list + 1] = code
+  saveFavorites(list)
+  refreshFavorites()
+  sf.speak('В избранное добавлено: ' .. name)
+end
 
-  local choice = sf.ui.choose('Куда перевести?', options, { selected = last })
+local function removeFavorite(code, form)
+  local list, kept, removed = favorites(), {}, false
+  for _, item in ipairs(list) do
+    if item == code then removed = true else kept[#kept + 1] = item end
+  end
+  if not removed then return end
+  saveFavorites(kept)
+  pcall(form.set, form, 'favorites', { items = favoriteRows() })
+  sf.speak('Удалено: ' .. NAME[code])
+end
 
-  if choice == '$all' then
-    local all = {}
-    for _, entry in ipairs(ALL) do
-      all[#all + 1] = { value = entry.code, label = entry.name }
+local function moveFavorite(code, delta, form)
+  local list, at = favorites(), nil
+  for i, item in ipairs(list) do
+    if item == code then at = i break end
+  end
+  if not at then return end
+  local target = at + delta
+  if target < 1 or target > #list then
+    sf.speak(delta < 0 and 'Выше двигать некуда' or 'Ниже двигать некуда')
+    return
+  end
+  list[at], list[target] = list[target], list[at]
+  saveFavorites(list)
+  pcall(form.set, form, 'favorites', { items = favoriteRows() })
+  sf.speak((delta < 0 and 'Выше: ' or 'Ниже: ') .. NAME[code])
+end
+
+-- Окно со всеми языками: поиск сверху, список ниже. Двойной удар по языку
+-- сразу переводит на него, а в меню действий у каждой строки — «Добавить в избранное».
+local function openAllLanguages(onPick)
+  sf.ui.window({
+    title = 'Все языки',
+    items = {
+      {
+        type = 'edit',
+        id = 'search',
+        label = 'Поиск',
+        hint = 'название или код языка',
+        onChange = function(value, form)
+          local rows = languageRows(value)
+          pcall(form.set, form, 'langs', {
+            items = rows,
+            label = trim(value) == '' and 'Языки' or ('Найдено: ' .. #rows),
+          })
+        end,
+      },
+      {
+        type = 'items',
+        id = 'langs',
+        label = 'Языки',
+        items = languageRows(''),
+        actions = { 'Добавить в избранное' },
+        onSelect = function(code, form)
+          pcall(form.close, form)
+          onPick(code)
+        end,
+        onAction = function(action, code)
+          if action == 'Добавить в избранное' then addFavorite(code) end
+        end,
+      },
+    },
+  })
+end
+
+-- Главное окно: избранные языки, следом кнопка «Все языки».
+local function openFavorites(onPick)
+  local function pick(code)
+    if favoritesWindow then
+      pcall(favoritesWindow.close, favoritesWindow)
+      favoritesWindow = nil
     end
-    choice = sf.ui.choose('Все языки', all, { selected = last })
-  elseif choice == '$manual' then
-    local typed = sf.ui.prompt('Код языка', { hint = 'например: en, kk, uk, zh-Hans' })
-    if typed then
-      choice = trim(typed)
-      if choice == '' then choice = nil end
-    end
+    onPick(code)
   end
 
-  return choice
+  favoritesWindow = sf.ui.window({
+    title = 'Куда перевести?',
+    items = {
+      {
+        type = 'items',
+        id = 'favorites',
+        label = 'Избранные языки',
+        items = favoriteRows(),
+        empty = 'Избранных языков пока нет. Откройте «Все языки» и добавьте нужные.',
+        actions = { 'Переместить выше', 'Переместить ниже', 'Удалить' },
+        onSelect = function(code, form)
+          pcall(form.close, form)
+          favoritesWindow = nil
+          onPick(code)
+        end,
+        onAction = function(action, code, form)
+          if action == 'Переместить выше' then
+            moveFavorite(code, -1, form)
+          elseif action == 'Переместить ниже' then
+            moveFavorite(code, 1, form)
+          elseif action == 'Удалить' then
+            removeFavorite(code, form)
+          end
+        end,
+      },
+      {
+        type = 'button',
+        id = 'all',
+        label = 'Все языки',
+        onClick = function()
+          openAllLanguages(pick)
+        end,
+      },
+    },
+    onClose = function()
+      favoritesWindow = nil
+    end,
+  })
 end
 
 -- Поле ввода, в которое можно вставить перевод. Возвращает элемент и его текст.
@@ -352,40 +495,38 @@ sf.onCommand('translate', function()
   local text, field = getText()
   if not text or text == '' then return end
 
-  local code = chooseLanguage()
-  if not code then return end
+  openFavorites(function(code)
+    local name = NAME[code] or code
 
-  local name = NAME[code] or code
-  remember(code)
-
-  sf.speak('Перевод: ' .. name)
-  local result, err = translate(text, code)
-  if not result then
-    sf.ui.alert(
-      'Перевести не получилось.\n\n' .. tostring(err)
-        .. '\n\nЕсли в настройках SandFly → Перевод выбрано «На устройстве», '
-        .. 'этот язык может быть не скачан или не поддержан. '
-        .. 'Google Cloud Translation понимает все языки из списка.',
-      { title = 'Ошибка перевода' }
-    )
-    return
-  end
-
-  -- Поле ввода: по умолчанию возвращаем перевод туда же, где был исходный текст.
-  if field and sf.settings.get('replace') ~= false then
-    local replaced, why = replaceInField(text, result)
-    if replaced then
-      sf.speak('Перевод вставлен: ' .. name)
+    sf.speak('Перевод: ' .. name)
+    local result, err = translate(text, code)
+    if not result then
+      sf.ui.alert(
+        'Перевести не получилось.\n\n' .. tostring(err)
+          .. '\n\nЕсли в настройках SandFly → Перевод выбрано «На устройстве», '
+          .. 'этот язык может быть не скачан или не поддержан. '
+          .. 'Google Cloud Translation понимает все языки из списка.',
+        { title = 'Ошибка перевода' }
+      )
       return
     end
-    -- Не вышло — показываем перевод в окне и коротко говорим, почему поле не тронуто.
-    sf.speak('В поле не вставлено: ' .. why)
-  end
 
-  local copied = false
-  if sf.settings.get('copy') ~= false then
-    copied = (pcall(sf.clipboard.set, result))
-  end
+    -- Поле ввода: по умолчанию возвращаем перевод туда же, где был исходный текст.
+    if field and sf.settings.get('replace') ~= false then
+      local replaced, why = replaceInField(text, result)
+      if replaced then
+        sf.speak('Перевод вставлен: ' .. name)
+        return
+      end
+      -- Не вышло — показываем перевод в окне и коротко говорим, почему поле не тронуто.
+      sf.speak('В поле не вставлено: ' .. why)
+    end
 
-  sf.ui.text('Перевод: ' .. name .. (copied and ' (скопировано)' or ''), result)
+    local copied = false
+    if sf.settings.get('copy') ~= false then
+      copied = (pcall(sf.clipboard.set, result))
+    end
+
+    sf.ui.text('Перевод: ' .. name .. (copied and ' (скопировано)' or ''), result)
+  end)
 end)
