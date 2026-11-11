@@ -28,6 +28,13 @@
 -- в английском — Open Voice Transcription / Show transcript. Поэтому ищем по
 -- обрывку слова, а не по точному тексту.
 --
+-- Версия 1.6: нажатие на отправку пробуется по очереди — сначала обычный клик,
+-- потом касание по центру кнопки и только потом поиск заново. Если ни один
+-- способ не сработал, команда говорит «Отправить не получилось», а не молчит.
+-- Из нескольких совпадений берётся самое маленькое: у большого контейнера
+-- центр может оказаться между кнопками. Ожидание начала записи больше не
+-- складывает таймауты всех подписей подряд.
+--
 -- Версия 1.5: состояние записи распознаётся по паузе, «Отмене» и
 -- «Отправить», а не по пропаже микрофона: микрофон из дерева не исчезает, и
 -- второй жест начинал вторую запись вместо отправки. Отправка в Nekogram —
@@ -63,7 +70,7 @@
 local manifest = {
   id = 'wam.nekogram-actions',
   name = 'Nekogram: кнопки сообщений в Actions',
-  version = '1.5',
+  version = '1.6',
   author = 'Алёшка',
   minApiVersion = 2,
   testedApiVersion = 4,
@@ -502,8 +509,14 @@ local MIC_QUERIES = {
   { textContains = 'oice message' },
 }
 
--- Отправка появляется, как только запись началась. В Nekogram это View с
--- текстом «Отправить», а не кнопка с описанием, — поэтому ищем и по тексту.
+-- Отправка во время записи. В Nekogram это View с текстом «Отправить», а не
+-- кнопка с описанием, — поэтому ищем прежде всего по тексту. Поиск по описанию
+-- идёт следом: такое же описание бывает у обычной кнопки отправки в поле ввода.
+local SEND_TEXTS = {
+  { text = 'Отправить' },
+  { text = 'Send' },
+}
+
 local SEND_QUERIES = {
   { text = 'Отправить' },
   { text = 'Send' },
@@ -522,35 +535,44 @@ local RECORDING_MARKERS = {
   { contentDescription = 'Отмена' },
 }
 
-local function findAny(queries)
+local function areaOf(item)
+  local b = item and item.bounds
+  if not b then
+    return 0
+  end
+  local w = b.right - b.left
+  local h = b.bottom - b.top
+  if w <= 0 or h <= 0 then
+    return 0
+  end
+  return w * h
+end
+
+-- Из всех совпадений берём самое маленькое: у большого контейнера центр может
+-- оказаться между кнопками, а нам нужна сама кнопка. Элемент без границ
+-- отдаётся, только если других нет вовсе.
+local function smallestMatch(queries)
   for _, query in ipairs(queries) do
-    local item = sf.screen.find(query)
-    if item and item.visible ~= false then
-      return item
+    local ok, list = pcall(sf.screen.findAll, query, 20)
+    if ok and list then
+      local best, bestArea, fallback
+      for _, item in ipairs(list) do
+        if item.visible ~= false then
+          if not fallback then
+            fallback = item
+          end
+          local area = areaOf(item)
+          if area > 0 and (bestArea == nil or area < bestArea) then
+            best, bestArea = item, area
+          end
+        end
+      end
+      if best or fallback then
+        return best or fallback
+      end
     end
   end
   return nil
-end
-
-local function waitAny(queries, timeout)
-  for _, query in ipairs(queries) do
-    local item = sf.screen.waitFor(query, timeout, 200)
-    if item then
-      return item
-    end
-  end
-  return nil
-end
-
--- Нажимает первый найденный элемент: кнопку — кликом, остальное — касанием.
-local function clickAny(queries)
-  for _, query in ipairs(queries) do
-    local item = sf.screen.find(query)
-    if item and item.visible ~= false then
-      return sf.screen.click(query)
-    end
-  end
-  return false
 end
 
 local function pointIn(item)
@@ -564,8 +586,87 @@ local function pointIn(item)
   return math.floor((b.left + b.right) / 2), math.floor((b.top + b.bottom) / 2), b
 end
 
-local function recordingNow()
-  return findAny(RECORDING_MARKERS) ~= nil
+-- Отправка по тексту: такое совпадение бывает только во время записи.
+local function textSendOnScreen()
+  for _, query in ipairs(SEND_TEXTS) do
+    if smallestMatch({ query }) then
+      return true
+    end
+  end
+  return false
+end
+
+local function recordingUi()
+  return smallestMatch(RECORDING_MARKERS) ~= nil or textSendOnScreen()
+end
+
+-- Ждём, пока признаки записи уйдут с экрана: значит, отправка сработала.
+local function waitGone(timeout)
+  local left = timeout
+  while left > 0 do
+    if not recordingUi() then
+      return true
+    end
+    sf.sleep(150)
+    left = left - 150
+  end
+  return not recordingUi()
+end
+
+local function waitRecording(timeout)
+  local left = timeout
+  while left > 0 do
+    if recordingUi() then
+      return true
+    end
+    sf.sleep(150)
+    left = left - 150
+  end
+  return recordingUi()
+end
+
+-- Нажатие на «Отправить» по очереди разными способами: в Nekogram это обычный
+-- View, у которого нет действия клика, и попасть в него можно только касанием
+-- по центру.
+local function pressSend(send)
+  pcall(function()
+    send:click()
+  end)
+  if waitGone(600) then
+    return true
+  end
+
+  local x, y = pointIn(send)
+  if x then
+    pcall(function()
+      sf.touch.tap(x, y)
+    end)
+    if waitGone(900) then
+      return true
+    end
+  end
+
+  if x then
+    pcall(function()
+      sf.touch.gesture({
+        { points = { { x = x, y = y } }, start = 0, duration = 60 },
+      })
+    end)
+    if waitGone(900) then
+      return true
+    end
+  end
+
+  if send.text then
+    pcall(function()
+      sf.screen.click({ text = send.text })
+    end)
+    if waitGone(900) then
+      return true
+    end
+  end
+
+  return false
 end
 
 -- Запись в Telegram начинается с нажатия на микрофон, а чтобы палец можно
@@ -597,14 +698,17 @@ end
 
 -- Одно и то же сочетание: запись идёт — отправить, не идёт — начать её.
 sf.onCommand('voice_toggle', function()
-  if recordingNow() then
-    if not clickAny(SEND_QUERIES) then
+  if recordingUi() then
+    local send = smallestMatch(SEND_QUERIES)
+    if not send then
       sf.speak('Кнопка отправки не найдена')
+    elseif not pressSend(send) then
+      sf.speak('Отправить не получилось')
     end
     return
   end
 
-  local mic = findAny(MIC_QUERIES)
+  local mic = smallestMatch(MIC_QUERIES)
   if not mic then
     sf.speak('Кнопка записи не найдена')
     return
@@ -615,7 +719,7 @@ sf.onCommand('voice_toggle', function()
   end
   -- Замок срабатывает не всегда: если отправки не появилось, запись уже
   -- ушла коротким сообщением либо не началась.
-  if not waitAny(SEND_QUERIES, 2500) then
+  if not waitRecording(2500) then
     sf.speak('Запись не началась')
   end
 end)
@@ -635,4 +739,4 @@ sf.onCommand('focus_chats', function()
   end
 end)
 
-print('Nekogram: кнопки сообщений в Actions, версия 1.5 загружена')
+print('Nekogram: кнопки сообщений в Actions, версия 1.6 загружена')
