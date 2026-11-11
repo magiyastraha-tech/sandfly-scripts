@@ -28,6 +28,12 @@
 -- в английском — Open Voice Transcription / Show transcript. Поэтому ищем по
 -- обрывку слова, а не по точному тексту.
 --
+-- Версия 1.8: жест одним пальцем вниз с удержанием читает статус контакта в
+-- открытом чате: «онлайн», «был(а) в сети …». Статус ищется только в шапке,
+-- выше ленты сообщений, — поэтому «был в сети» из текста сообщения за статус
+-- не сойдёт. Скрипт ничего не нажимает, только проговаривает. Если статуса нет
+-- (группа, канал, скрытая активность), он так и говорит: «Статус не найден».
+--
 -- Версия 1.7: фокус на список чатов проверяется после перевода. Приложение
 -- дорисовывает главный экран уже после нашего фокуса и само уводит его на
 -- заголовок сверху — список при этом успевает проговориться, а фокус остаётся
@@ -77,11 +83,11 @@
 local manifest = {
   id = 'wam.nekogram-actions',
   name = 'Nekogram: кнопки сообщений в Actions',
-  version = '1.7',
+  version = '1.8',
   author = 'Алёшка',
   minApiVersion = 2,
   testedApiVersion = 4,
-  description = 'Убирает «Поделиться» и кнопку расшифровки из свайпа по сообщениям Nekogram и добавляет их в Actions сообщения. При открытии приложения фокус встаёт на список чатов, а при входе в чат — на заголовок «Непрочитанные сообщения». Жест «два пальца, дважды» записывает голосовое сообщение, он же его отправляет.',
+  description = 'Убирает «Поделиться» и кнопку расшифровки из свайпа по сообщениям Nekogram и добавляет их в Actions сообщения. При открытии приложения фокус встаёт на список чатов, а при входе в чат — на заголовок «Непрочитанные сообщения». Жест «два пальца, дважды» записывает голосовое сообщение, он же его отправляет. Жест вниз с удержанием читает статус контакта в открытом чате.',
   apps = { 'tw.nekomimi.nekogram' },
   permissions = { 'screen', 'speech', 'actions', 'input' },
   commands = {
@@ -91,6 +97,12 @@ local manifest = {
       id = 'voice_toggle',
       title = 'Голосовое: записать или отправить',
       gesture = 'twoFingerDoubleTap',
+      menu = true,
+    },
+    {
+      id = 'chat_status',
+      title = 'Статус контакта',
+      gesture = 'swipeDownAndHold',
       menu = true,
     },
   },
@@ -774,6 +786,108 @@ sf.onCommand('voice_toggle', function()
   end
 end)
 
+-- ── Статус контакта по жесту ──
+
+-- Шапка чата показывает присутствие: «онлайн», «был(а) в сети 5 минут назад»,
+-- «печатает…». Ищем по обрывкам подписи, в русском и английском. textContains
+-- проверяет и текст, и contentDescription.
+local STATUS_MARKERS = {
+  'онлайн',
+  'в сети',
+  'печатает',
+  'записывает',
+  'online',
+  'last seen',
+  'typing',
+  'recording',
+}
+
+-- Верх ленты сообщений: самый крупный видимый прокручиваемый список. Всё, что
+-- выше него, — шапка чата.
+local function messageListTop()
+  local lists = sf.screen.findAll({ scrollable = true }, 20)
+  if not lists then
+    return nil
+  end
+  local best, bestArea = nil, 0
+  for _, item in ipairs(lists) do
+    if item.visible ~= false then
+      local a = area(item)
+      if a > bestArea then
+        best, bestArea = item, a
+      end
+    end
+  end
+  local b = best and best.bounds
+  if b and b.top > 0 then
+    return b.top
+  end
+  return nil
+end
+
+-- Граница шапки по вертикали. Обычно это верх ленты сообщений; если списка
+-- почему-то нет — верхняя четверть экрана. За границей статус не ищем, иначе
+-- «был в сети» поймается из текста сообщения.
+local function headerLimit()
+  local limit = nil
+  local root = sf.screen.root()
+  local b = root and root.bounds
+  if b and b.bottom > b.top then
+    limit = b.top + math.floor((b.bottom - b.top) / 4)
+  end
+  local top = messageListTop()
+  if top and (limit == nil or top < limit) then
+    limit = top
+  end
+  return limit
+end
+
+-- Из совпадений в шапке берём самое маленькое — это сама подпись статуса, а не
+-- контейнер вокруг неё. При равной площади — то, что выше.
+local function statusOnScreen()
+  local limit = headerLimit()
+  local best, bestTop, bestArea = nil, nil, nil
+  for _, marker in ipairs(STATUS_MARKERS) do
+    local ok, list = pcall(sf.screen.findAll, { textContains = marker }, 30)
+    if ok and list then
+      for _, item in ipairs(list) do
+        local b = item.bounds
+        if item.visible ~= false and b and (limit == nil or b.top < limit) then
+          local a = area(item)
+          if bestArea == nil or a < bestArea or (a == bestArea and b.top < bestTop) then
+            best, bestTop, bestArea = item, b.top, a
+          end
+        end
+      end
+    end
+  end
+  return best
+end
+
+local function statusText(item)
+  local text = item.text
+  if text == nil or text == '' then
+    text = item.contentDescription
+  end
+  return text
+end
+
+-- Только проговаривает статус: никаких нажатий, чтобы не открыть профиль
+-- вместо чтения.
+sf.onCommand('chat_status', function()
+  if not insideSubScreen() then
+    sf.speak('Чат не открыт')
+    return
+  end
+  local status = statusOnScreen()
+  local text = status and statusText(status)
+  if text == nil or text == '' then
+    sf.speak('Статус не найден')
+    return
+  end
+  sf.speak(text, { interrupt = true })
+end)
+
 -- Ручной переход: SandFly → Команды → «Перейти к списку чатов».
 sf.onCommand('focus_chats', function()
   local list = findMainList(3000)
@@ -786,4 +900,4 @@ sf.onCommand('focus_chats', function()
   end
 end)
 
-print('Nekogram: кнопки сообщений в Actions, версия 1.7 загружена')
+print('Nekogram: кнопки сообщений в Actions, версия 1.8 загружена')
