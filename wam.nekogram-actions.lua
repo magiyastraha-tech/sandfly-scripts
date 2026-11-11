@@ -28,6 +28,11 @@
 -- в английском — Open Voice Transcription / Show transcript. Поэтому ищем по
 -- обрывку слова, а не по точному тексту.
 --
+-- Версия 1.5: состояние записи распознаётся по паузе, «Отмене» и
+-- «Отправить», а не по пропаже микрофона: микрофон из дерева не исчезает, и
+-- второй жест начинал вторую запись вместо отправки. Отправка в Nekogram —
+-- View с текстом «Отправить», а не кнопка с описанием.
+--
 -- Версия 1.4: команда «Голосовое: записать или отправить» на жест двумя
 -- пальцами дважды. Первый жест начинает запись и удерживает её: палец на
 -- микрофоне ведут вверх, до замка, — так запись продолжается после того, как
@@ -58,7 +63,7 @@
 local manifest = {
   id = 'wam.nekogram-actions',
   name = 'Nekogram: кнопки сообщений в Actions',
-  version = '1.4',
+  version = '1.5',
   author = 'Алёшка',
   minApiVersion = 2,
   testedApiVersion = 4,
@@ -497,11 +502,24 @@ local MIC_QUERIES = {
   { textContains = 'oice message' },
 }
 
--- Отправка появляется на месте микрофона, как только запись началась.
+-- Отправка появляется, как только запись началась. В Nekogram это View с
+-- текстом «Отправить», а не кнопка с описанием, — поэтому ищем и по тексту.
 local SEND_QUERIES = {
+  { text = 'Отправить' },
+  { text = 'Send' },
   { contentDescription = 'Отправить' },
   { contentDescription = 'Send' },
-  { contentDescription = 'Отправить голосовое сообщение' },
+}
+
+-- Признаки идущей записи: «Пауза» и «Отмена» — они есть на экране только во
+-- время записи. Микрофон при этом из дерева не пропадает (он лишь уезжает за
+-- экран), поэтому по нему состояние не определить — второй жест начинал
+-- вторую запись вместо отправки.
+local RECORDING_MARKERS = {
+  { text = 'Пауза' },
+  { text = 'Отмена' },
+  { contentDescription = 'Пауза' },
+  { contentDescription = 'Отмена' },
 }
 
 local function findAny(queries)
@@ -524,16 +542,43 @@ local function waitAny(queries, timeout)
   return nil
 end
 
+-- Нажимает первый найденный элемент: кнопку — кликом, остальное — касанием.
+local function clickAny(queries)
+  for _, query in ipairs(queries) do
+    local item = sf.screen.find(query)
+    if item and item.visible ~= false then
+      return sf.screen.click(query)
+    end
+  end
+  return false
+end
+
+local function pointIn(item)
+  local b = item and item.bounds
+  if not b then
+    return nil
+  end
+  if b.right - b.left <= 0 or b.bottom - b.top <= 0 then
+    return nil
+  end
+  return math.floor((b.left + b.right) / 2), math.floor((b.top + b.bottom) / 2), b
+end
+
+local function recordingNow()
+  return findAny(RECORDING_MARKERS) ~= nil
+end
+
 -- Запись в Telegram начинается с нажатия на микрофон, а чтобы палец можно
 -- было отпустить и запись продолжалась, палец ведут вверх до замка. Здесь то
 -- же самое одним касанием: пауза на микрофоне и подъём вверх.
 local function startRecording(mic)
-  local b = mic.bounds
-  if not b then
+  pcall(function()
+    mic:showOnScreen()
+  end)
+  local x, y, b = pointIn(mic)
+  if not x then
     return false
   end
-  local x = math.floor((b.left + b.right) / 2)
-  local y = math.floor((b.top + b.bottom) / 2)
   local up = (b.bottom - b.top) * 4
   if y - up < 80 then
     up = y - 80
@@ -550,29 +595,29 @@ local function startRecording(mic)
   })
 end
 
--- Одно и то же сочетание: запись не идёт — начать её, идёт — отправить.
+-- Одно и то же сочетание: запись идёт — отправить, не идёт — начать её.
 sf.onCommand('voice_toggle', function()
+  if recordingNow() then
+    if not clickAny(SEND_QUERIES) then
+      sf.speak('Кнопка отправки не найдена')
+    end
+    return
+  end
+
   local mic = findAny(MIC_QUERIES)
-  if mic then
-    if not startRecording(mic) then
-      sf.speak('Не получилось начать запись')
-      return
-    end
-    -- Замок срабатывает не всегда: если отправки не появилось, запись уже
-    -- ушла коротким сообщением либо не началась.
-    if not waitAny(SEND_QUERIES, 2500) then
-      sf.speak('Запись не началась')
-    end
+  if not mic then
+    sf.speak('Кнопка записи не найдена')
     return
   end
-
-  local send = findAny(SEND_QUERIES)
-  if send then
-    send:click()
+  if not startRecording(mic) then
+    sf.speak('Не получилось начать запись')
     return
   end
-
-  sf.speak('Кнопка записи не найдена')
+  -- Замок срабатывает не всегда: если отправки не появилось, запись уже
+  -- ушла коротким сообщением либо не началась.
+  if not waitAny(SEND_QUERIES, 2500) then
+    sf.speak('Запись не началась')
+  end
 end)
 
 -- Ручной переход: SandFly → Команды → «Перейти к списку чатов».
@@ -590,4 +635,4 @@ sf.onCommand('focus_chats', function()
   end
 end)
 
-print('Nekogram: кнопки сообщений в Actions, версия 1.4 загружена')
+print('Nekogram: кнопки сообщений в Actions, версия 1.5 загружена')
