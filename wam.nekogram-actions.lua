@@ -28,6 +28,12 @@
 -- в английском — Open Voice Transcription / Show transcript. Поэтому ищем по
 -- обрывку слова, а не по точному тексту.
 --
+-- Версия 1.3: заголовок в дереве есть, но сам он не фокусируемый — фокус
+-- ставится на TextView внутри него. Попытка в чате теперь одна: скрипт
+-- пробует до трёх раз за первый заход (пока чат дорисовывается), а потом в
+-- этом чате фокус больше не трогает — иначе при каждом изменении экрана он
+-- отбирал фокус обратно и «дёргал» его.
+--
 -- Версия 1.2: заголовок ищется по нескольким подписям; если сам заголовок
 -- фокус не берёт, он ставится на ближайший элемент, который берёт. Скрипт
 -- слушает не только смену окна, но и изменение содержимого экрана — чат в
@@ -46,7 +52,7 @@
 local manifest = {
   id = 'wam.nekogram-actions',
   name = 'Nekogram: кнопки сообщений в Actions',
-  version = '1.2',
+  version = '1.3',
   author = 'Алёшка',
   minApiVersion = 2,
   testedApiVersion = 4,
@@ -374,6 +380,29 @@ end
 local lastKey = nil
 local pending = false
 
+-- Одна попытка на чат: до трёх заходов с паузой, пока чат дорисовывается.
+-- После этого lastKey запомнен и в этом чате фокус больше не трогается.
+local function attemptFocus(key)
+  lastKey = key
+  for round = 1, 3 do
+    local header = findUnreadHeader(round == 1 and 1500 or 700)
+    if not header then
+      return
+    end
+    if header.visible == false then
+      return
+    end
+    if not insideSubScreen() then
+      return
+    end
+    if sameItem(sf.screen.focused(), header) then
+      return
+    end
+    focusItem(header)
+    sf.sleep(400)
+  end
+end
+
 local function focusUnread()
   if sf.settings.get('focusUnread') == false then
     return
@@ -403,16 +432,15 @@ local function focusUnread()
       if header.visible == false then
         return
       end
-      if sameItem(sf.screen.focused(), header) then
-        return
-      end
       local key = headerKey(header)
       if key == lastKey then
         return
       end
-      if focusItem(header) then
+      if sameItem(sf.screen.focused(), header) then
         lastKey = key
+        return
       end
+      attemptFocus(key)
     end)
     pending = false
     if not ok then
@@ -460,4 +488,4 @@ sf.onCommand('focus_chats', function()
   end
 end)
 
-print('Nekogram: кнопки сообщений в Actions, версия 1.2 загружена')
+print('Nekogram: кнопки сообщений в Actions, версия 1.3 загружена')
