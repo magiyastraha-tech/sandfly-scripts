@@ -28,6 +28,10 @@
 -- в английском — Open Voice Transcription / Show transcript. Поэтому ищем по
 -- обрывку слова, а не по точному тексту.
 --
+-- Версия 1.1: при входе в любой чат, если в нём есть заголовок «Непрочитанные
+-- сообщения», фокус встаёт на него — дальше можно идти свайпом по непрочитанному.
+-- Если заголовка нет, фокус остаётся там, где его поставил SandFly.
+--
 -- Версия 1.0: при открытии приложения фокус встаёт на список чатов.
 -- В чате, настройках и других внутренних экранах скрипт фокус не трогает:
 -- признак внутреннего экрана — кнопка «Назад» вверху.
@@ -35,11 +39,11 @@
 local manifest = {
   id = 'wam.nekogram-actions',
   name = 'Nekogram: кнопки сообщений в Actions',
-  version = '1.0',
+  version = '1.1',
   author = 'Алёшка',
   minApiVersion = 2,
   testedApiVersion = 4,
-  description = 'Убирает «Поделиться» и кнопку расшифровки из свайпа по сообщениям Nekogram и добавляет их в Actions сообщения. При открытии приложения фокус встаёт на список чатов.',
+  description = 'Убирает «Поделиться» и кнопку расшифровки из свайпа по сообщениям Nekogram и добавляет их в Actions сообщения. При открытии приложения фокус встаёт на список чатов, а при входе в чат — на заголовок «Непрочитанные сообщения».',
   apps = { 'tw.nekomimi.nekogram' },
   permissions = { 'screen', 'speech', 'actions', 'input' },
   commands = {
@@ -51,6 +55,13 @@ local manifest = {
       type = 'switch',
       title = 'Фокус на список чатов',
       summary = 'При открытии приложения фокус встаёт на список чатов',
+      default = true,
+    },
+    {
+      key = 'focusUnread',
+      type = 'switch',
+      title = 'Фокус на непрочитанные',
+      summary = 'При входе в чат фокус встаёт на заголовок «Непрочитанные сообщения»',
       default = true,
     },
   },
@@ -271,6 +282,61 @@ sf.onAppEnter(function()
   focusChats()
 end)
 
+-- ── Фокус на заголовок «Непрочитанные сообщения» ──
+
+local UNREAD_RU = { textContains = 'епрочитанные сообщения' }
+local UNREAD_EN = { textContains = 'nread messages' }
+
+-- Заголовок в Nekogram — точная подпись; обрывок без учёта регистра переживёт
+-- другой регистр и лишние пробелы.
+local function findUnreadHeader(timeout)
+  local header = sf.screen.waitFor(UNREAD_RU, timeout, 250)
+  if not header then
+    header = sf.screen.waitFor(UNREAD_EN, 700, 250)
+  end
+  return header
+end
+
+-- Один и тот же элемент из двух запросов — это разные объекты, поэтому
+-- сравниваем по тексту и классу.
+local function sameItem(a, b)
+  if not a or not b then
+    return false
+  end
+  return a.text == b.text and a.className == b.className
+end
+
+local unreadGen = 0
+
+local function focusUnread()
+  if sf.settings.get('focusUnread') == false then
+    return
+  end
+  unreadGen = unreadGen + 1
+  local mine = unreadGen
+  sf.run(function()
+    local header = findUnreadHeader(3000)
+    if not header or mine ~= unreadGen then
+      return
+    end
+    -- Заголовок бывает только в чате; на главном экране и в настройках не лезем.
+    if not insideSubScreen() then
+      return
+    end
+    if header.visible == false then
+      return
+    end
+    if sameItem(sf.screen.focused(), header) then
+      return
+    end
+    header:focus()
+  end)
+end
+
+sf.onWindowChange(function()
+  focusUnread()
+end)
+
 -- Ручной переход: SandFly → Команды → «Перейти к списку чатов».
 sf.onCommand('focus_chats', function()
   local list = findMainList(3000)
@@ -286,4 +352,4 @@ sf.onCommand('focus_chats', function()
   end
 end)
 
-print('Nekogram: кнопки сообщений в Actions, версия 1.0 загружена')
+print('Nekogram: кнопки сообщений в Actions, версия 1.1 загружена')
