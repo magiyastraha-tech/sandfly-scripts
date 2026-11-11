@@ -1,7 +1,7 @@
 local manifest = {
   id = 'wam.translator',
   name = 'Переводчик',
-  version = '2.0',
+  version = '2.1',
   author = 'Slonobass',
   minApiVersion = 4,
   testedApiVersion = 4,
@@ -408,6 +408,15 @@ local function openFavorites(onPick)
           openAllLanguages(pick)
         end,
       },
+      {
+        type = 'switch',
+        id = 'copy',
+        label = 'Копировать в буфер',
+        value = sf.settings.get('copy') ~= false,
+        onChange = function(value)
+          sf.settings.set('copy', value)
+        end,
+      },
     },
     onClose = function()
       favoritesWindow = nil
@@ -511,20 +520,22 @@ sf.onCommand('translate', function()
       return
     end
 
+    -- Копируем до вставки в поле: переключатель «Копировать в буфер» в главном окне
+    -- отвечает именно за копирование после перевода, куда бы перевод ни пошёл.
+    local copied = false
+    if sf.settings.get('copy') ~= false then
+      copied = (pcall(sf.clipboard.set, result))
+    end
+
     -- Поле ввода: по умолчанию возвращаем перевод туда же, где был исходный текст.
     if field and sf.settings.get('replace') ~= false then
       local replaced, why = replaceInField(text, result)
       if replaced then
-        sf.speak('Перевод вставлен: ' .. name)
+        sf.speak('Перевод вставлен: ' .. name .. (copied and ' (скопировано)' or ''))
         return
       end
       -- Не вышло — показываем перевод в окне и коротко говорим, почему поле не тронуто.
       sf.speak('В поле не вставлено: ' .. why)
-    end
-
-    local copied = false
-    if sf.settings.get('copy') ~= false then
-      copied = (pcall(sf.clipboard.set, result))
     end
 
     sf.ui.text('Перевод: ' .. name .. (copied and ' (скопировано)' or ''), result)
