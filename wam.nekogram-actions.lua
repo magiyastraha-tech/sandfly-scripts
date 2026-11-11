@@ -28,6 +28,13 @@
 -- в английском — Open Voice Transcription / Show transcript. Поэтому ищем по
 -- обрывку слова, а не по точному тексту.
 --
+-- Версия 1.7: фокус на список чатов проверяется после перевода. Приложение
+-- дорисовывает главный экран уже после нашего фокуса и само уводит его на
+-- заголовок сверху — список при этом успевает проговориться, а фокус остаётся
+-- наверху. Теперь после каждого перевода скрипт смотрит, где фокус оказался, и,
+-- если он ушёл из списка, переводит ещё раз — до четырёх попыток за секунду с
+-- небольшим. В чат, открытый пользователем, фокус по-прежнему не лезет.
+--
 -- Версия 1.6: нажатие на отправку пробуется по очереди — сначала обычный клик,
 -- потом касание по центру кнопки и только потом поиск заново. Если ни один
 -- способ не сработал, команда говорит «Отправить не получилось», а не молчит.
@@ -70,7 +77,7 @@
 local manifest = {
   id = 'wam.nekogram-actions',
   name = 'Nekogram: кнопки сообщений в Actions',
-  version = '1.6',
+  version = '1.7',
   author = 'Алёшка',
   minApiVersion = 2,
   testedApiVersion = 4,
@@ -292,6 +299,58 @@ local function firstRow(list)
   return fallback
 end
 
+-- Фокус внутри этого списка. Сам контейнер считается тоже: SandFly отдаёт
+-- фокус контейнеру, когда строки его не берут.
+local function focusedInList(list, cur)
+  if not cur then
+    return false
+  end
+  if cur == list then
+    return true
+  end
+  return isInside(list, cur)
+end
+
+-- Одного перевода мало: приложение дорисовывает экран уже после нас и уводит
+-- фокус на заголовок сверху. Поэтому после каждой попытки смотрим, где фокус
+-- оказался, и, если он не в списке, переводим снова.
+local FOCUS_TRIES = 4
+local FOCUS_STEP = 300
+
+-- Переводит фокус в список и убеждается, что он там остался. Возвращает
+-- признак успеха; список к концу может быть уже другим узлом.
+local function placeFocus(list)
+  if focusedInList(list, sf.screen.focused()) then
+    return true
+  end
+  for _ = 1, FOCUS_TRIES do
+    local row = firstRow(list)
+    if row then
+      pcall(function()
+        row:focus()
+      end)
+    else
+      pcall(function()
+        list:focus()
+      end)
+    end
+    sf.sleep(FOCUS_STEP)
+    if focusedInList(list, sf.screen.focused()) then
+      return true
+    end
+    -- Пользователь мог сам открыть чат — тогда больше не лезем.
+    if insideSubScreen() then
+      return false
+    end
+    -- Экран перерисовался: список берём заново, старый узел мог устареть.
+    local again = findMainList(500)
+    if again then
+      list = again
+    end
+  end
+  return false
+end
+
 -- Главный экран Nekogram: ставим фокус на список чатов. Если контейнер
 -- фокус не берёт — на первый чат.
 local function focusChats()
@@ -307,16 +366,7 @@ local function focusChats()
     if insideSubScreen() then
       return
     end
-    local cur = sf.screen.focused()
-    if cur and isInside(list, cur) then
-      return
-    end
-    local row = firstRow(list)
-    if row then
-      row:focus()
-    else
-      list:focus()
-    end
+    placeFocus(list)
   end)
 end
 
@@ -731,12 +781,9 @@ sf.onCommand('focus_chats', function()
     sf.speak('Список чатов не найден')
     return
   end
-  local row = firstRow(list)
-  if row then
-    row:focus()
-  elseif not list:focus() then
+  if not placeFocus(list) and not insideSubScreen() then
     sf.speak('Список чатов не найден')
   end
 end)
 
-print('Nekogram: кнопки сообщений в Actions, версия 1.6 загружена')
+print('Nekogram: кнопки сообщений в Actions, версия 1.7 загружена')
