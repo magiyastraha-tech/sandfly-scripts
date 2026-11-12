@@ -1,14 +1,15 @@
 -- YMusic: в строке видео только название и время.
--- Остальное (канал, просмотры, дата публикации) и кнопка «Ещё» — в меню действий.
+-- Остальное (канал, просмотры, дата публикации) — в меню действий строки видео.
+-- Кнопка «Ещё» спрятана в любой строке списка и открывается из меню действий.
 
 local manifest = {
   id = 'ymusic.video_rows',
   name = 'YMusic: название и время',
   author = 'Алёшка',
-  version = '1.5',
+  version = '1.6',
   minApiVersion = 1,
   testedApiVersion = 4,
-  description = 'В списках видео строка читает только название и время. Канал, просмотры, дата публикации и кнопка «Ещё» переезжают в меню действий. При входе в приложение и при каждом открытии вкладки «Подписки» фокус всегда встаёт на раздел «Новые».',
+  description = 'В списках видео строка читает только название и время. Канал, просмотры и дата публикации переезжают в меню действий. Кнопка «Ещё» скрыта в любой строке списка — и в «Подписках», и на главной — и открывается из меню действий. При входе в приложение и при каждом открытии вкладки «Подписки» фокус всегда встаёт на раздел «Новые».',
   apps = { 'io.ymusic.android' },
   permissions = { 'screen', 'speech', 'input', 'actions' },
   commands = {
@@ -42,14 +43,16 @@ local manifest = {
     },
   },
   rules = {
-    -- Кнопку «Ещё» внутри строки видео прячем: она уходит в меню действий.
+    -- Кнопку «Ещё» прячем в любой строке списка, не только в «Подписках».
+    -- Строку выдаёт разделитель « · » между данными: он есть у видео, клипов,
+    -- миксов, подкастов и плейлистов, поэтому перечислять типы не нужно.
     -- Только match, без id: id вместе с match требует совпадения и по id, и по запросу.
     {
-      match = { className = 'Button', contentDescription = 'Ещё', inside = { textContains = 'Видео' } },
+      match = { className = 'Button', contentDescription = 'Ещё', inside = { textContains = ' · ' } },
       hide = true,
     },
     {
-      match = { className = 'Button', contentDescription = 'More', inside = { textContains = 'Video' } },
+      match = { className = 'Button', contentDescription = 'More', inside = { textContains = ' · ' } },
       hide = true,
     },
   },
@@ -148,10 +151,44 @@ sf.onFocus(function(item, text)
   return { speak = row.title .. ', ' .. lineTime(row) }
 end)
 
+-- Кнопка «Ещё» в строке: правилом она убрана из обхода, но сам узел
+-- остаётся в дереве экрана, поэтому её можно найти и нажать.
+local function findMore(it)
+  if not it then return nil end
+  local button = it:find({ className = 'Button', contentDescription = 'Ещё' })
+  if not button then button = it:find({ className = 'Button', contentDescription = 'More' }) end
+  if not button then button = it:find({ className = 'Button', text = 'Ещё' }) end
+  return button
+end
+
+local function clickMore(it)
+  local button = findMore(it)
+  if not button and it then button = it:find({ className = 'Button' }) end
+  if button then
+    button:click()
+  else
+    sf.speak('Кнопка «Ещё» не найдена')
+  end
+end
+
 -- Действия: канал, остальная информация и кнопка «Ещё».
 sf.onActions(function(item)
   local row = item and parseVideoRow(item.text)
-  if not row then return nil end
+  if not row then
+    -- Строка не из «Подписок» — на главной это «Клип», «Микс», плейлист.
+    -- Название и время у неё не трогаем, но спрятанную кнопку «Ещё»
+    -- возвращаем в меню действий, иначе её меню было бы недоступно.
+    local more = findMore(item)
+    if not more then return nil end
+    return {
+      {
+        title = 'Ещё',
+        run = function(it)
+          clickMore(it)
+        end,
+      },
+    }
+  end
 
   local actions = {
     {
@@ -175,15 +212,7 @@ sf.onActions(function(item)
   actions[#actions + 1] = {
     title = 'Ещё',
     run = function(it)
-      local button = it and it:find({ className = 'Button', contentDescription = 'Ещё' })
-      if not button and it then button = it:find({ className = 'Button', contentDescription = 'More' }) end
-      if not button and it then button = it:find({ className = 'Button', text = 'Ещё' }) end
-      if not button and it then button = it:find({ className = 'Button' }) end
-      if button then
-        button:click()
-      else
-        sf.speak('Кнопка «Ещё» не найдена')
-      end
+      clickMore(it)
     end,
   }
 
