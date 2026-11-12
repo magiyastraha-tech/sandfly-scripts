@@ -1,15 +1,15 @@
--- YMusic: в строке видео только название и время.
--- Остальное (канал, просмотры, дата публикации) — в меню действий строки видео.
+-- YMusic: в строке видео, клипа и трансляции только название и время.
+-- Остальное (канал, просмотры, дата публикации) — в меню действий строки.
 -- Кнопка «Ещё» спрятана в любой строке списка и открывается из меню действий.
 
 local manifest = {
   id = 'ymusic.video_rows',
   name = 'YMusic: название и время',
   author = 'Алёшка',
-  version = '1.6',
+  version = '1.7',
   minApiVersion = 1,
   testedApiVersion = 4,
-  description = 'В списках видео строка читает только название и время. Канал, просмотры и дата публикации переезжают в меню действий. Кнопка «Ещё» скрыта в любой строке списка — и в «Подписках», и на главной — и открывается из меню действий. При входе в приложение и при каждом открытии вкладки «Подписки» фокус всегда встаёт на раздел «Новые».',
+  description = 'Видео, клип и трансляция в списке читают только название и время. Канал, просмотры и дата публикации переезжают в меню действий — у видео, клипов, трансляций, миксов и плейлистов. Кнопка «Ещё» скрыта в любой строке списка — и в «Подписках», и на главной — и открывается из меню действий. При входе в приложение и при каждом открытии вкладки «Подписки» фокус всегда встаёт на раздел «Новые».',
   apps = { 'io.ymusic.android' },
   permissions = { 'screen', 'speech', 'input', 'actions' },
   commands = {
@@ -62,62 +62,100 @@ local function trim(s)
   return (s:gsub('^%s+', ''):gsub('%s+$', ''))
 end
 
--- Позиция последнего вхождения sep в строке, или nil.
-local function lastPos(s, sep)
-  local pos, from = nil, 1
+-- Делит строку на куски по разделителю, не считая его шаблоном Lua.
+local function splitBy(text, sep)
+  local parts, start = {}, 1
   while true do
-    local a = string.find(s, sep, from, true)
-    if not a then return pos end
-    pos = a
-    from = a + #sep
+    local a = string.find(text, sep, start, true)
+    if not a then
+      parts[#parts + 1] = text:sub(start)
+      return parts
+    end
+    parts[#parts + 1] = text:sub(start, a - 1)
+    start = a + #sep
   end
 end
 
--- Разбирает строку YMusic вида:
+-- Длительность: «11 минут 57 секунд», «2:30», «1 hour». В канале цифры
+-- тоже бывают, поэтому мало одной цифры — нужно слово времени или двоеточие.
+local function looksLikeDuration(s)
+  if type(s) ~= 'string' or s == '' or not string.find(s, '%d') then return false end
+  if string.find(s, ':', 1, true) then return true end
+  if string.find(s, 'мин', 1, true) or string.find(s, 'сек', 1, true)
+     or string.find(s, 'час', 1, true) then
+    return true
+  end
+  local low = s:lower()
+  return string.find(low, 'min', 1, true) ~= nil
+      or string.find(low, 'sec', 1, true) ~= nil
+      or string.find(low, 'hour', 1, true) ~= nil
+end
+
+-- Типы строк, у которых есть канал, просмотры и дата: видео, клипы, трансляции.
+-- string.lower кириллицу не трогает, поэтому русские типы сравниваем как есть.
+local function isVideoKind(kind)
+  if kind == 'Видео' or kind == 'Клип' or kind == 'Видеоклип'
+     or kind == 'Трансляция' or kind == 'Прямая трансляция'
+     or kind == 'Эфир' or kind == 'Прямой эфир' then
+    return true
+  end
+  local low = kind:lower()
+  return low == 'video' or low == 'clip' or low == 'live'
+      or low == 'live stream' or low == 'stream'
+end
+
+-- Разбирает строку YMusic. Видео и клипы:
 --   Видео, <название>, <длительность>, <канал> · <просмотры> · <когда>
+-- Трансляция бывает без длительности: <тип>, <название>, <канал> · … · …
+-- Микс и плейлист короче: <тип>, <название> · Плейлист.
 -- Название может содержать запятые, поэтому режем с конца.
-local function parseVideoRow(text)
+local function parseRow(text)
   if type(text) ~= 'string' or text == '' then return nil end
 
-  local sep = ' · '
+  local segs = splitBy(text, ' · ')
+  if #segs < 2 then return nil end
 
-  local pubPos = lastPos(text, sep)
-  if not pubPos then return nil end
-  local published = trim(text:sub(pubPos + #sep))
-  local rest1 = text:sub(1, pubPos - 1)
-
-  local viewsPos = lastPos(rest1, sep)
-  if not viewsPos then return nil end
-  local views = trim(rest1:sub(viewsPos + #sep))
-  local head = rest1:sub(1, viewsPos - 1)
-
-  local parts, start = {}, 1
-  while true do
-    local comma = string.find(head, ',', start, true)
-    if not comma then
-      parts[#parts + 1] = trim(head:sub(start))
-      break
-    end
-    parts[#parts + 1] = trim(head:sub(start, comma - 1))
-    start = comma + 1
+  local head = trim(segs[1])
+  local published = trim(segs[#segs])
+  local views = nil
+  if #segs >= 3 then
+    local mid = {}
+    for i = 2, #segs - 1 do mid[#mid + 1] = trim(segs[i]) end
+    views = table.concat(mid, ', ')
+    if views == '' then views = nil end
   end
 
-  if #parts < 4 then return nil end
+  local parts = splitBy(head, ',')
+  if #parts < 2 then return nil end
 
-  local kind = parts[1]
-  if kind ~= 'Видео' and string.lower(kind) ~= 'video' then return nil end
+  local kind = trim(parts[1])
+  local video = isVideoKind(kind)
+  local channel, duration = nil, nil
+  local titleTo = #parts
 
-  local channel = parts[#parts]
-  local duration = parts[#parts - 1]
+  if video and #parts >= 4 and looksLikeDuration(parts[#parts - 1]) then
+    channel = trim(parts[#parts])
+    duration = trim(parts[#parts - 1])
+    titleTo = #parts - 2
+  elseif video and #parts >= 3 then
+    -- Трансляция без длительности: последняя часть — канал.
+    channel = trim(parts[#parts])
+    titleTo = #parts - 1
+  end
+
   local titleParts = {}
-  for i = 2, #parts - 2 do
-    titleParts[#titleParts + 1] = parts[i]
-  end
+  for i = 2, titleTo do titleParts[#titleParts + 1] = trim(parts[i]) end
   local title = table.concat(titleParts, ', ')
 
-  if title == '' or channel == '' or duration == '' or views == '' then return nil end
+  if title == '' then return nil end
+  if channel == '' then channel = nil end
+  if duration == '' then duration = nil end
+  -- У микса и плейлиста последний кусок («Плейлист») — тип строки, а не дата.
+  if not video then published = nil end
 
   return {
+    kind = kind,
+    video = video,
     title = title,
     duration = duration,
     channel = channel,
@@ -128,27 +166,36 @@ end
 
 local function lineTime(row)
   local mode = sf.settings.get('lineTime') or 'duration'
-  if mode == 'published' then return row.published end
-  if mode == 'both' then return row.duration .. ', ' .. row.published end
-  return row.duration
+  if mode == 'published' then return row.published or row.duration end
+  if mode == 'both' then
+    if row.duration and row.published then return row.duration .. ', ' .. row.published end
+    return row.duration or row.published
+  end
+  return row.duration or row.published
 end
 
 local function restText(row)
   local mode = sf.settings.get('lineTime') or 'duration'
   local parts = {}
-  if mode == 'published' then parts[#parts + 1] = row.duration end
-  parts[#parts + 1] = row.views
-  if mode == 'duration' then parts[#parts + 1] = row.published end
+  if mode == 'published' and row.duration then parts[#parts + 1] = row.duration end
+  if row.views then parts[#parts + 1] = row.views end
+  -- Дату не повторяем, если она уже прозвучала временем строки: так бывает
+  -- у трансляции, где длительности нет и временем становится статус.
+  if mode ~= 'published' and row.published and row.duration then
+    parts[#parts + 1] = row.published
+  end
   return table.concat(parts, ', ')
 end
 
--- Строка видео говорит только название и время.
+-- Строка видео, клипа или трансляции говорит только название и время.
 sf.onFocus(function(item, text)
-  local row = item and parseVideoRow(item.text)
-  if not row and text then row = parseVideoRow(text) end
-  if not row then return nil end
+  local row = item and parseRow(item.text)
+  if not row and text then row = parseRow(text) end
+  if not row or not row.video then return nil end
   if sf.settings.get('shorten') == false then return nil end
-  return { speak = row.title .. ', ' .. lineTime(row) }
+  local t = lineTime(row)
+  if not t then return nil end
+  return { speak = row.title .. ', ' .. t }
 end)
 
 -- Кнопка «Ещё» в строке: правилом она убрана из обхода, но сам узел
@@ -172,50 +219,46 @@ local function clickMore(it)
 end
 
 -- Действия: канал, остальная информация и кнопка «Ещё».
+-- Одна и та же сборка для видео, клипов, трансляций, миксов и плейлистов:
+-- каждый пункт появляется, если данные в строке есть.
 sf.onActions(function(item)
-  local row = item and parseVideoRow(item.text)
-  if not row then
-    -- Строка не из «Подписок» — на главной это «Клип», «Микс», плейлист.
-    -- Название и время у неё не трогаем, но спрятанную кнопку «Ещё»
-    -- возвращаем в меню действий, иначе её меню было бы недоступно.
-    local more = findMore(item)
-    if not more then return nil end
-    return {
-      {
-        title = 'Ещё',
-        run = function(it)
-          clickMore(it)
+  if not item then return nil end
+  local row = parseRow(item.text)
+  local actions = {}
+
+  if row then
+    if row.channel then
+      actions[#actions + 1] = {
+        title = 'Канал: ' .. row.channel,
+        run = function()
+          sf.speak('Канал: ' .. row.channel)
         end,
-      },
-    }
+      }
+    end
+
+    local rest = restText(row)
+    if rest ~= '' then
+      actions[#actions + 1] = {
+        title = 'Остальное: ' .. rest,
+        run = function()
+          sf.speak(rest)
+        end,
+      }
+    end
   end
 
-  local actions = {
-    {
-      title = 'Канал: ' .. row.channel,
-      run = function()
-        sf.speak('Канал: ' .. row.channel)
-      end,
-    },
-  }
-
-  local rest = restText(row)
-  if rest ~= '' then
+  -- Спрятанную кнопку «Ещё» возвращаем в меню на любой строке: иначе её
+  -- собственное меню было бы недоступно.
+  if findMore(item) then
     actions[#actions + 1] = {
-      title = 'Остальное: ' .. rest,
-      run = function()
-        sf.speak(rest)
+      title = 'Ещё',
+      run = function(it)
+        clickMore(it)
       end,
     }
   end
 
-  actions[#actions + 1] = {
-    title = 'Ещё',
-    run = function(it)
-      clickMore(it)
-    end,
-  }
-
+  if #actions == 0 then return nil end
   return actions
 end)
 
@@ -239,7 +282,8 @@ end
 local function focusIsInList()
   local cur = sf.screen.focused()
   if not cur then return false end
-  return parseVideoRow(cur.text) ~= nil
+  local row = cur and parseRow(cur.text)
+  return row ~= nil and row.video
 end
 
 -- Фокус уже стоит на заголовке — второй раз не дёргаем.
