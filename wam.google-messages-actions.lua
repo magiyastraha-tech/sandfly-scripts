@@ -1,20 +1,20 @@
 -- Действия с разговором в Google Messages.
--- Русская версия скрипта google-messages-actions.lua (автор Surendra) из
+-- Основа — скрипт google-messages-actions.lua (автор Surendra) из
 -- github.com/aaron-gh/sandfly-scripts, лицензия Apache License 2.0.
 -- Добавляет в меню действий каждого разговора в списке Google Messages пункты:
--- закрепить, пометить как непрочитанное, удалить, отложить уведомления и
--- добавить контакт.
+-- пометить как непрочитанное, удалить, отложить уведомления и добавить
+-- контакт.
 -- Тексты для поиска кнопок даны и по-русски, и по-английски: скрипт работает
 -- при любом языке интерфейса приложения.
 
 local manifest = {
   id = 'wam.google-messages-actions',
   name = 'Google Messages: действия с разговором',
-  version = '1.0.1-ru',
-  author = 'Surendra, русская версия',
+  version = '1.1',
+  author = 'Алёшка',
   minApiVersion = 1,
   testedApiVersion = 1,
-  description = 'В меню действий каждого разговора в списке Google Messages добавляет пункты: закрепить, пометить как непрочитанное, удалить, отложить уведомления и добавить контакт.',
+  description = 'В меню действий каждого разговора в списке Google Messages добавляет пункты: пометить как непрочитанное или прочитанное, удалить, отложить уведомления и добавить контакт. Кнопки ищутся и по русским, и по английским подписям.',
   apps = { 'com.google.android.apps.messaging' },
   permissions = { 'screen', 'actions', 'speech', 'input' },
 }
@@ -34,16 +34,6 @@ local DONE = { { id = 'action_mode_close_button' } }
 -- "bar": кнопка на панели, которая появляется, когда разговор выделен.
 -- "menu": пункт в меню «Ещё», а это отдельное окно.
 local ACTIONS = {
-  {
-    title = 'Закрепить или открепить разговор',
-    where = 'bar',
-    queries = {
-      { id = 'action_pin_to_top' },
-      { textContains = 'Открепить' },
-      { textContains = 'Отменить закрепление' },
-      { textContains = 'Unpin' },
-    },
-  },
   {
     title = 'Пометить как непрочитанное или прочитанное',
     where = 'menu',
