@@ -2,19 +2,19 @@
 -- Русская версия скрипта google-messages-actions.lua (автор Surendra) из
 -- github.com/aaron-gh/sandfly-scripts, лицензия Apache License 2.0.
 -- Добавляет в меню действий каждого разговора в списке Google Messages пункты:
--- закрепить, пометить как непрочитанное, архивировать, удалить, отложить,
--- заблокировать и добавить контакт.
+-- закрепить, пометить как непрочитанное, удалить, отложить уведомления и
+-- добавить контакт.
 -- Тексты для поиска кнопок даны и по-русски, и по-английски: скрипт работает
 -- при любом языке интерфейса приложения.
 
 local manifest = {
   id = 'wam.google-messages-actions',
   name = 'Google Messages: действия с разговором',
-  version = '1.0.0-ru',
+  version = '1.0.1-ru',
   author = 'Surendra, русская версия',
   minApiVersion = 1,
   testedApiVersion = 1,
-  description = 'В меню действий каждого разговора в списке Google Messages добавляет пункты: закрепить, пометить как непрочитанное, архивировать, удалить, отложить, заблокировать и добавить контакт.',
+  description = 'В меню действий каждого разговора в списке Google Messages добавляет пункты: закрепить, пометить как непрочитанное, удалить, отложить уведомления и добавить контакт.',
   apps = { 'com.google.android.apps.messaging' },
   permissions = { 'screen', 'actions', 'speech', 'input' },
 }
@@ -57,16 +57,6 @@ local ACTIONS = {
     },
   },
   {
-    title = 'Архивировать разговор',
-    where = 'bar',
-    queries = {
-      { id = 'action_archive' },
-      { textContains = 'Разархивировать' },
-      { textContains = 'Вернуть из архива' },
-      { textContains = 'Unarchive' },
-    },
-  },
-  {
     title = 'Удалить разговор',
     where = 'bar',
     queries = { { id = 'action_delete' } },
@@ -78,14 +68,6 @@ local ACTIONS = {
       { id = 'action_snooze' },
       { textContains = 'Отложить' },
       { textContains = 'Snooze' },
-    },
-  },
-  {
-    title = 'Заблокировать',
-    where = 'menu',
-    queries = {
-      { textContains = 'Заблокировать' },
-      { textContains = 'Block' },
     },
   },
   {
