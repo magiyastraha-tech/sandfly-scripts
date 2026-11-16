@@ -29,6 +29,13 @@
 -- в английском — Open Voice Transcription / Show transcript. Поэтому ищем по
 -- обрывку слова, а не по точному тексту.
 --
+-- Версия 1.14: сохранение пробует несколько путей открыть панель и несколько
+-- способов найти кнопку. Сообщение перед этим ищется на экране заново — узел
+-- из меню к моменту запуска мог устареть. Кнопка берётся в первую очередь из
+-- фокуса: когда панель открывается, фокус в Nekogram встаёт как раз на неё.
+-- Если и это не помогло, скрипт говорит, открылась ли панель и какие кнопки
+-- видны, — по этому ответу видно, где именно обрывается.
+--
 -- Версия 1.13: пункт «Сохранить в загрузки» появляется у файла в любом
 -- состоянии, в том числе у ещё не скачанного. Файл теперь узнаётся по подписи
 -- самого сообщения — слово «файл» и размер, — а не по действию «Загрузка»: у
@@ -112,7 +119,7 @@
 local manifest = {
   id = 'wam.nekogram-actions',
   name = 'Nekogram: кнопки сообщений в Actions',
-  version = '1.13',
+  version = '1.14',
   author = 'Алёшка',
   minApiVersion = 2,
   testedApiVersion = 5,
@@ -327,13 +334,66 @@ local function isFileMessage(item)
   return false
 end
 
+-- Заголовок открытой панели выделения: «Выбрано 1». По нему панель видна
+-- быстрее всего — одним запросом, без обхода остальных окон.
+local function panelTitle()
+  local ok, title = pcall(function()
+    return sf.screen.find({ textContains = 'Выбрано' })
+  end)
+  if ok then return title end
+  return nil
+end
+
+-- Подпись элемента для проверки: описание для диктора и текст вместе.
+local function labelOf(node)
+  if not node then return '' end
+  return lower((node.contentDescription or '') .. ' ' .. (node.text or ''))
+end
+
+-- Кнопка сохранения из фокуса. Когда панель открывается, фокус в Nekogram
+-- встаёт как раз на неё — это самый короткий путь, без поиска по экрану.
+local function focusedSave()
+  local ok, node = pcall(function() return sf.screen.focused() end)
+  if not ok or not node then return nil end
+  local label = labelOf(node)
+  if label:find('сохран', 1, true) or label:find('save', 1, true) then
+    return node
+  end
+  return nil
+end
+
+-- Кнопка сохранения из самой панели: панель узнаём по заголовку «Выбрано»,
+-- кнопки берём у его родителя. Нужно на случай, если подпись в этой сборке
+-- другая и обычный поиск по тексту её не находит.
+local function panelSave()
+  local title = panelTitle()
+  if not title then return nil end
+  local pOk, panel = pcall(function() return title:parent() end)
+  if not pOk or not panel then return nil end
+  local fOk, buttons = pcall(function()
+    return panel:findAll({ className = 'ImageButton' }, 8)
+  end)
+  if not fOk or type(buttons) ~= 'table' then return nil end
+  for _, button in ipairs(buttons) do
+    local label = labelOf(button)
+    if label:find('сохран', 1, true) or label:find('save', 1, true) then
+      return button
+    end
+  end
+  return nil
+end
+
 -- Кнопка сохранения, если панель уже открыта. Ищем и в активном окне, и в
 -- остальных: панель может оказаться отдельным окном.
 local function findSave()
+  local focused = focusedSave()
+  if focused then return focused end
   for _, query in ipairs(SAVE_QUERIES) do
     local ok, found = pcall(function() return sf.screen.find(query) end)
     if ok and found then return found end
   end
+  local fromPanel = panelSave()
+  if fromPanel then return fromPanel end
   local ok, windows = pcall(function() return sf.screen.windows() end)
   if ok and type(windows) == 'table' then
     for _, win in ipairs(windows) do
@@ -349,7 +409,7 @@ local function findSave()
 end
 
 local function waitSave(tries)
-  for _ = 1, tries or 8 do
+  for _ = 1, tries or 6 do
     local button = findSave()
     if button then return button end
     sf.sleep(120)
@@ -357,13 +417,45 @@ local function waitSave(tries)
   return nil
 end
 
--- Открыта ли панель выделения: кнопка сохранения или заголовок «Выбрано 1».
+-- Открыта ли панель выделения: заголовок «Выбрано 1» или кнопка сохранения.
 local function panelOpen()
-  if findSave() then return true end
-  local ok, title = pcall(function()
-    return sf.screen.find({ textContains = 'Выбрано' })
+  return panelTitle() ~= nil or findSave() ~= nil
+end
+
+-- Подписи кнопок, которые сейчас видны. Нужны для сообщения о неудаче: по ним
+-- понятно, открылась ли панель и как называется кнопка в этой сборке.
+local function buttonLabels(limit)
+  local names = {}
+  local ok, buttons = pcall(function()
+    return sf.screen.findAll({ className = 'ImageButton' }, 12)
   end)
-  return ok and title ~= nil
+  if ok and type(buttons) == 'table' then
+    for _, button in ipairs(buttons) do
+      local label = button.contentDescription or button.text
+      if label and label ~= '' and #names < (limit or 4) then
+        names[#names + 1] = label
+      end
+    end
+  end
+  return names
+end
+
+-- Элемент из меню к моменту запуска мог устареть. Свежий узел берём с экрана по
+-- началу подписи сообщения: он живой и нажимается надёжнее.
+local function refindMessage(item)
+  local text = item.text or item.contentDescription or ''
+  local line = text:match('^[^\n]*') or ''
+  line = line:gsub('^%s+', '')
+  if #line > 40 then
+    -- Обрезаем по пробелу, а не по байту: разрезанная буква не совпадёт.
+    line = line:sub(1, 40):match('^(.*)%s') or line:sub(1, 40)
+  end
+  if line == '' then return nil end
+  local ok, found = pcall(function()
+    return sf.screen.find({ textContains = line })
+  end)
+  if ok then return found end
+  return nil
 end
 
 -- Нажимает элемент: обычное нажатие, а если не принял — касание по центру.
@@ -388,12 +480,35 @@ local function closePanel(button)
   if backOk and back then press(back) end
 end
 
+-- Говорит, что видно на экране, когда сохранить не удалось: открылась ли
+-- панель и какие кнопки подписаны.
+local function speakFailure()
+  local parts = {}
+  if panelOpen() then
+    parts[#parts + 1] = 'Панель открыта'
+  else
+    parts[#parts + 1] = 'Панель не открылась'
+  end
+  local focused = sf.screen.focused and sf.screen.focused()
+  local focusedLabel = focused and (focused.contentDescription or focused.text)
+  if focusedLabel and focusedLabel ~= '' then
+    parts[#parts + 1] = 'фокус: ' .. focusedLabel
+  end
+  local names = buttonLabels(4)
+  if #names > 0 then
+    parts[#parts + 1] = 'кнопки: ' .. table.concat(names, ', ')
+  else
+    parts[#parts + 1] = 'подписанных кнопок нет'
+  end
+  sf.speak(table.concat(parts, '; '))
+end
+
 -- Панель рисуется не мгновенно, поэтому кнопку ждём отдельным вызовом-таймером:
 -- у действия всего две секунды, и поиск в них не укладывался.
 local function pressSaveLater()
-  local button = waitSave(8)
+  local button = waitSave(6)
   if not button then
-    sf.speak('Кнопка «Сохранить в загрузки» не найдена')
+    speakFailure()
     return
   end
   press(button)
@@ -401,36 +516,49 @@ local function pressSaveLater()
   sf.setTimeout(function() closePanel(button) end, 1200)
 end
 
+-- Открывает панель выделения и передаёт кнопку сохранения таймеру. Порядок:
+-- действие приложения на свежем узле, оно же на узле из меню, а если панель так
+-- и не открылась — долгое касание по центру и долгое нажатие. Каждое касание
+-- проверяется по заголовку «Выбрано», это один запрос.
 local function saveFileToDownloads(item)
   if not item then
     sf.speak('Сообщение не найдено')
     return
   end
   -- Панель могла остаться открытой с прошлого раза: тогда сразу кнопка.
-  if findSave() then
+  if panelOpen() then
     sf.setTimeout(pressSaveLater, 100)
     return
   end
-  -- Сначала действие приложения, и только если оно не открыло панель — долгое
-  -- нажатие. Оба сразу нельзя: долгое нажатие по уже выделенному сообщению
-  -- сняло бы выделение и закрыло панель.
-  local opened = false
-  for _, name in ipairs(SELECT_ACTIONS) do
-    local ok, done = pcall(function() return item:perform(name) end)
-    if ok and done ~= false then
-      sf.sleep(150)
-      if panelOpen() then
-        opened = true
-        break
+  local nodes = {}
+  local fresh = refindMessage(item)
+  if fresh then nodes[#nodes + 1] = fresh end
+  nodes[#nodes + 1] = item
+  for index, node in ipairs(nodes) do
+    pcall(function() node:refresh() end)
+    local names = index == 1 and SELECT_ACTIONS or { SELECT_ACTIONS[1] }
+    for _, name in ipairs(names) do
+      local ok, done = pcall(function() return node:perform(name) end)
+      if ok and done ~= false then
+        sf.sleep(120)
+        if panelTitle() then
+          sf.setTimeout(pressSaveLater, 120)
+          return
+        end
       end
     end
   end
-  if not opened then
-    local ok, done = pcall(function() return item:longClick() end)
-    if not ok or done == false then
-      pcall(function() return item:longPress(700) end)
-    end
+  -- Действия панель не открыли: пробуем касание с удержанием по центру, затем
+  -- программное долгое нажатие.
+  local node = nodes[1] or item
+  pcall(function() node:longPress(800) end)
+  sf.sleep(200)
+  if panelTitle() then
+    sf.setTimeout(pressSaveLater, 120)
+    return
   end
+  pcall(function() node:longClick() end)
+  sf.sleep(200)
   sf.setTimeout(pressSaveLater, 200)
 end
 
@@ -1206,4 +1334,4 @@ sf.onCommand('focus_chats', function()
   end
 end)
 
-print('Nekogram: кнопки сообщений в Actions, версия 1.13 загружена')
+print('Nekogram: кнопки сообщений в Actions, версия 1.14 загружена')
