@@ -29,6 +29,14 @@
 -- в английском — Open Voice Transcription / Show transcript. Поэтому ищем по
 -- обрывку слова, а не по точному тексту.
 --
+-- Версия 1.13: пункт «Сохранить в загрузки» появляется у файла в любом
+-- состоянии, в том числе у ещё не скачанного. Файл теперь узнаётся по подписи
+-- самого сообщения — слово «файл» и размер, — а не по действию «Загрузка»: у
+-- нескачанного файла этого действия может не быть, и пункт пропадал. Панель
+-- выделения открывается действием приложения «Перейти в режим выбора», а не
+-- касанием: программное долгое нажатие на сообщение не срабатывало. Кнопка
+-- сохранения ищется и в остальных окнах, а не только в активном.
+--
 -- Версия 1.12: у файлового сообщения в меню появился пункт «Сохранить в
 -- загрузки». Кнопка сохранения живёт не в самом сообщении, а в верхней панели
 -- выбранного сообщения, поэтому пункт повторяет ручной путь: долгое нажатие на
@@ -104,11 +112,11 @@
 local manifest = {
   id = 'wam.nekogram-actions',
   name = 'Nekogram: кнопки сообщений в Actions',
-  version = '1.12',
+  version = '1.13',
   author = 'Алёшка',
   minApiVersion = 2,
   testedApiVersion = 5,
-  description = 'Убирает «Комментарии» и «Поделиться» из свайпа по сообщениям Nekogram и возвращает их в меню действий: «Комментарии» — первым пунктом, выше «Ответить», «Поделиться» — внизу. У файлового сообщения в меню есть пункт «Сохранить в загрузки»: он открывает панель выбранного сообщения и нажимает в ней кнопку сохранения. Кнопку расшифровки голосового скрипт убирает из свайпа и в меню не возвращает. При открытии приложения фокус встаёт на список чатов, а при входе в чат — на заголовок «Непрочитанные сообщения». Жест «два пальца, дважды» записывает голосовое сообщение, он же его отправляет. Жест «три пальца с удержанием» читает статус контакта в открытом чате: «онлайн» или «был(а) в 16:25».',
+  description = 'Убирает «Комментарии» и «Поделиться» из свайпа по сообщениям Nekogram и возвращает их в меню действий: «Комментарии» — первым пунктом, выше «Ответить», «Поделиться» — внизу. У файлового сообщения в меню есть пункт «Сохранить в загрузки»: он выделяет файл и нажимает кнопку сохранения в верхней панели. Кнопку расшифровки голосового скрипт убирает из свайпа и в меню не возвращает. При открытии приложения фокус встаёт на список чатов, а при входе в чат — на заголовок «Непрочитанные сообщения». Жест «два пальца, дважды» записывает голосовое сообщение, он же его отправляет. Жест «три пальца с удержанием» читает статус контакта в открытом чате: «онлайн» или «был(а) в 16:25».',
   apps = { 'tw.nekomimi.nekogram' },
   permissions = { 'screen', 'speech', 'actions', 'input' },
   commands = {
@@ -228,79 +236,202 @@ end
 -- ── Сохранение файла в «Загрузки» ──
 
 -- Кнопка «Сохранить в загрузки» лежит не в самом сообщении, а в верхней панели
--- выбранного сообщения: она появляется после долгого нажатия на файл. Поэтому
--- пункт меню повторяет ручной путь — долгое нажатие, потом кнопка в панели.
-local DOWNLOAD_LABELS = { 'Загрузка', 'Download' }
-
-local SAVE_QUERIES = {
-  { className = 'ImageButton', contentDescription = 'Сохранить в загрузки' },
-  { contentDescription = 'Сохранить в загрузки' },
-  { className = 'ImageButton', contentDescription = 'Save to Downloads' },
-  { contentDescription = 'Save to Downloads' },
-  -- Запасной вариант, если кнопка окажется пунктом меню с подписью, а не
-  -- кнопкой с описанием.
-  { textContains = 'Сохранить в загрузки' },
-  { textContains = 'Save to Downloads' },
+-- выбранного сообщения: она появляется, когда сообщение выделено. Поэтому пункт
+-- меню сначала выделяет файл, а потом нажимает кнопку в панели.
+--
+-- Выделяет скрипт не касанием, а действием доступности самого приложения —
+-- «Перейти в режим выбора»: оно есть в списке действий файлового сообщения и
+-- делает ровно то же, что долгое нажатие. Долгое нажатие остаётся запасным
+-- путём: программное нажатие с удержанием Nekogram не принимал.
+local SELECT_ACTIONS = {
+  'Перейти в режим выбора',
+  'Enter selection mode',
+  'Select',
 }
 
--- Файл ли это: у сообщения с файлом среди действий доступности есть
--- «Загрузка», а в подписи — слово «файл». Проверка идёт по уже отданному
--- элементу, без поиска по экрану: у onActions на всё про всё 50 миллисекунд.
+-- Нижний регистр, включая кириллицу: string.lower трогает только латиницу, и
+-- «Загрузка» иначе не нашлась бы по обрывку «загруз». В UTF-8 заглавные А–П —
+-- байты D0 90–9F, Р–Я — D0 A0–AF, заглавная Ё — D0 81.
+local function lower(text)
+  local s = string.lower(text)
+  s = s:gsub('\208([\144-\159])', function(c)
+    return '\208' .. string.char(c:byte() + 32)
+  end)
+  s = s:gsub('\208([\160-\175])', function(c)
+    return '\209' .. string.char(c:byte() - 32)
+  end)
+  return (s:gsub('\208\129', '\209\145'))
+end
+
+-- Признаки загрузки в действиях сообщения. Подпись ищется по обрывку: у
+-- скачанного файла «Загрузка», у нескачанного — «Скачать» или Download.
+local DOWNLOAD_MARKERS = { 'загруз', 'скачат', 'download' }
+
+-- Размер в подписи: «399,1 MB», «12 КБ». Он есть у файла в любом состоянии и
+-- почти никогда — у обычного текста.
+local SIZE_MARKERS = { ' mb', ' kb', ' gb', 'мб', 'кб', 'гб' }
+
+-- Слово «файл» в подписи — его Nekogram и пишет перед именем.
+local FILE_MARKERS = { 'файл', 'file' }
+
+-- Подпись кнопки сохранения в панели. textContains сверяет и текст, и описание
+-- для диктора и не зависит от регистра; contentDescription — точное совпадение,
+-- поэтому он в конце.
+local SAVE_QUERIES = {
+  { className = 'ImageButton', textContains = 'Сохранить в загрузки' },
+  { textContains = 'Сохранить в загрузки' },
+  { className = 'ImageButton', textContains = 'Save to Downloads' },
+  { textContains = 'Save to Downloads' },
+  { className = 'ImageButton', textContains = 'Save to Download' },
+  { textContains = 'Save to Download' },
+  { contentDescription = 'Сохранить в загрузки' },
+  { contentDescription = 'Save to Downloads' },
+}
+
+local function hasMarker(low, markers)
+  for _, marker in ipairs(markers) do
+    if low:find(marker, 1, true) then return true end
+  end
+  return false
+end
+
+-- Файл ли это. Проверка идёт по уже отданному элементу, без поиска по экрану:
+-- у onActions на всё про всё 50 миллисекунд.
+--
+-- Размер в подписи — общий признак; дальше нужно либо слово «файл», либо
+-- действие загрузки. В подписи Nekogram читает файл как «файл имя, 399,1 МБ».
+-- Одно только действие «Загрузка» признаком не считаем: у нескачанного файла
+-- его может не быть вовсе — с этого и началась версия 1.13.
 local function isFileMessage(item)
   if not item then return false end
-  local hasDownload = false
+  local text = (item.text or '') .. ' ' .. (item.contentDescription or '')
+  if text == '' then return false end
+  local low = lower(text)
+  if not hasMarker(low, SIZE_MARKERS) then return false end
+  if hasMarker(low, FILE_MARKERS) then return true end
   local actions = item.actions
   if type(actions) == 'table' then
     for _, action in ipairs(actions) do
-      for _, name in ipairs(DOWNLOAD_LABELS) do
-        if action.id == name or action.label == name then
-          hasDownload = true
-          break
-        end
+      local name
+      if type(action) == 'table' then
+        name = action.id or action.label
+      else
+        name = action
       end
-      if hasDownload then break end
+      if name then
+        local lname = lower(tostring(name))
+        if hasMarker(lname, DOWNLOAD_MARKERS) then return true end
+      end
     end
   end
-  if not hasDownload then return false end
-  local text = (item.text or '') .. ' ' .. (item.contentDescription or '')
-  local low = string.lower(text)
-  return low:find('файл', 1, true) ~= nil or low:find('file', 1, true) ~= nil
+  return false
 end
 
--- Кнопка сохранения, если панель уже открыта.
-local function saveButton()
+-- Кнопка сохранения, если панель уже открыта. Ищем и в активном окне, и в
+-- остальных: панель может оказаться отдельным окном.
+local function findSave()
   for _, query in ipairs(SAVE_QUERIES) do
     local ok, found = pcall(function() return sf.screen.find(query) end)
     if ok and found then return found end
   end
+  local ok, windows = pcall(function() return sf.screen.windows() end)
+  if ok and type(windows) == 'table' then
+    for _, win in ipairs(windows) do
+      if win.root then
+        for _, query in ipairs(SAVE_QUERIES) do
+          local foundOk, found = pcall(function() return win.root:find(query) end)
+          if foundOk and found then return found end
+        end
+      end
+    end
+  end
   return nil
 end
 
--- Панель рисуется не мгновенно, поэтому после долгого нажатия кнопку коротко
--- ждём: шесть проверок по 120 миллисекунд укладываются в две секунды, которые
--- отводятся на действие.
-local function saveFileToDownloads(item)
-  local button = saveButton()
-  if not button then
-    local ok, longClicked = pcall(function() return item:longClick() end)
-    if not ok or longClicked == false then
-      pcall(function() return item:longPress(600) end)
-    end
-    for attempt = 1, 6 do
-      button = saveButton()
-      if button then break end
-      sf.sleep(120)
-    end
+local function waitSave(tries)
+  for _ = 1, tries or 8 do
+    local button = findSave()
+    if button then return button end
+    sf.sleep(120)
   end
+  return nil
+end
+
+-- Открыта ли панель выделения: кнопка сохранения или заголовок «Выбрано 1».
+local function panelOpen()
+  if findSave() then return true end
+  local ok, title = pcall(function()
+    return sf.screen.find({ textContains = 'Выбрано' })
+  end)
+  return ok and title ~= nil
+end
+
+-- Нажимает элемент: обычное нажатие, а если не принял — касание по центру.
+local function press(item)
+  if not item then return false end
+  local ok, clicked = pcall(function() return item:click() end)
+  if ok and clicked then return true end
+  local tappedOk, tapped = pcall(function() return item:tap() end)
+  return tappedOk and tapped ~= false
+end
+
+-- Закрывает панель выбранного сообщения её же кнопкой «Назад» — она лежит в той
+-- же строке, что и кнопка сохранения. Системную «назад» скрипт не жмёт: если
+-- панель успела закрыться сама, она вышла бы из чата.
+local function closePanel(button)
+  if not button then return end
+  local ok, panel = pcall(function() return button:parent() end)
+  if not ok or not panel then return end
+  local backOk, back = pcall(function()
+    return panel:find({ contentDescription = 'Назад' })
+  end)
+  if backOk and back then press(back) end
+end
+
+-- Панель рисуется не мгновенно, поэтому кнопку ждём отдельным вызовом-таймером:
+-- у действия всего две секунды, и поиск в них не укладывался.
+local function pressSaveLater()
+  local button = waitSave(8)
   if not button then
     sf.speak('Кнопка «Сохранить в загрузки» не найдена')
     return
   end
-  local ok, clicked = pcall(function() return button:click() end)
-  if not ok or clicked == false then
-    pcall(function() return button:tap() end)
-  end
+  press(button)
   sf.speak('Сохраняю в загрузки')
+  sf.setTimeout(function() closePanel(button) end, 1200)
+end
+
+local function saveFileToDownloads(item)
+  if not item then
+    sf.speak('Сообщение не найдено')
+    return
+  end
+  -- Панель могла остаться открытой с прошлого раза: тогда сразу кнопка.
+  if findSave() then
+    sf.setTimeout(pressSaveLater, 100)
+    return
+  end
+  -- Сначала действие приложения, и только если оно не открыло панель — долгое
+  -- нажатие. Оба сразу нельзя: долгое нажатие по уже выделенному сообщению
+  -- сняло бы выделение и закрыло панель.
+  local opened = false
+  for _, name in ipairs(SELECT_ACTIONS) do
+    local ok, done = pcall(function() return item:perform(name) end)
+    if ok and done ~= false then
+      sf.sleep(150)
+      if panelOpen() then
+        opened = true
+        break
+      end
+    end
+  end
+  if not opened then
+    local ok, done = pcall(function() return item:longClick() end)
+    if not ok or done == false then
+      pcall(function() return item:longPress(700) end)
+    end
+  end
+  sf.setTimeout(pressSaveLater, 200)
 end
 
 sf.onActions(function(item)
@@ -1075,4 +1206,4 @@ sf.onCommand('focus_chats', function()
   end
 end)
 
-print('Nekogram: кнопки сообщений в Actions, версия 1.12 загружена')
+print('Nekogram: кнопки сообщений в Actions, версия 1.13 загружена')
