@@ -2,57 +2,61 @@
 -- Основа — скрипт google-messages-actions.lua (автор Surendra) из
 -- github.com/aaron-gh/sandfly-scripts, лицензия Apache License 2.0.
 -- Добавляет в меню действий каждого разговора в списке Google Messages пункты:
--- пометить как непрочитанное, удалить и добавить контакт.
--- Тексты для поиска кнопок даны и по-русски, и по-английски: скрипт работает
--- при любом языке интерфейса приложения.
+-- отметить как прочитанное, удалить и добавить контакт.
+-- Работает так же, как руками: удержание на разговоре, затем «Другие
+-- параметры» во всплывшем меню, и уже там нужный пункт. Тексты для поиска
+-- даны и по-русски, и по-английски: скрипт работает при любом языке
+-- интерфейса приложения.
 
 local manifest = {
   id = 'wam.google-messages-actions',
   name = 'Google Messages: действия с разговором',
-  version = '1.2',
+  version = '1.3',
   author = 'Алёшка',
   minApiVersion = 1,
   testedApiVersion = 1,
-  description = 'В меню действий каждого разговора в списке Google Messages добавляет пункты: пометить как непрочитанное или прочитанное, удалить и добавить контакт. Кнопки ищутся и по русским, и по английским подписям.',
+  description = 'В меню действий каждого разговора в списке Google Messages добавляет пункты: отметить как прочитанное, удалить и добавить контакт. Скрипт удерживает разговор, открывает «Другие параметры» и нажимает нужный пункт. Кнопки ищутся и по русским, и по английским подписям.',
   apps = { 'com.google.android.apps.messaging' },
-  permissions = { 'screen', 'actions', 'speech', 'input' },
+  permissions = { 'screen', 'actions', 'speech', 'input', 'system' },
 }
 
 local ROW_ID = 'swipeableContainer'
 
+-- Кнопка «Другие параметры» во всплывшем после удержания меню. У Samsung она
+-- называется именно так; остальные варианты — запасные.
 local MORE = {
-  { contentDescription = 'Ещё' },
-  { contentDescription = 'Дополнительные параметры' },
-  { contentDescription = 'Другие действия' },
-  { contentDescription = 'Дополнительные действия' },
-  { textContains = 'More options' },
+  { textContains = 'Другие параметры' },
   { textContains = 'Дополнительные параметры' },
+  { textContains = 'Другие действия' },
+  { textContains = 'Дополнительные действия' },
+  { textContains = 'More options' },
+  { textContains = 'Ещё' },
 }
-local DONE = { { id = 'action_mode_close_button' } }
 
--- "bar": кнопка на панели, которая появляется, когда разговор выделен.
--- "menu": пункт в меню «Ещё», а это отдельное окно.
 local ACTIONS = {
   {
-    title = 'Пометить как непрочитанное или прочитанное',
-    where = 'menu',
+    title = 'Отметить как прочитанное',
     queries = {
-      { textContains = 'Пометить как непрочитанное' },
-      { textContains = 'Отметить как непрочитанное' },
-      { textContains = 'Пометить как прочитанное' },
       { textContains = 'Отметить как прочитанное' },
-      { textContains = 'Mark as unread' },
+      { textContains = 'Пометить как прочитанное' },
+      { textContains = 'Отметить как непрочитанное' },
+      { textContains = 'Пометить как непрочитанное' },
       { textContains = 'Mark as read' },
+      { textContains = 'Mark as unread' },
     },
   },
   {
     title = 'Удалить разговор',
-    where = 'bar',
-    queries = { { id = 'action_delete' } },
+    queries = {
+      { textContains = 'Удалить разговор' },
+      { textContains = 'Удалить беседу' },
+      { id = 'action_delete' },
+      { textContains = 'Delete' },
+      { textContains = 'Удалить' },
+    },
   },
   {
     title = 'Добавить контакт',
-    where = 'menu',
     queries = {
       { textContains = 'Добавить контакт' },
       { textContains = 'Add contact' },
@@ -98,27 +102,23 @@ end
 local function perform(row, action)
   sf.sleep(400)
   if not row:longClick() then
-    sf.speak('Не получилось выделить разговор')
+    sf.speak('Не получилось удержать разговор')
     return
   end
-  local target = nil
-  if action.where == 'bar' then
-    target = waitFor(action.queries)
-  else
-    local more = waitFor(MORE)
-    if more then
-      more:click()
-      target = waitFor(action.queries)
-    end
+  -- Иногда нужный пункт лежит прямо во всплывшем меню.
+  local target = waitFor(action.queries, 4)
+  if not target then
+    local more = waitFor(MORE, 8)
+    if more then more:click() end
+    target = waitFor(action.queries, 8)
   end
   if target then
     target:click()
     return
   end
   sf.speak(action.title .. ': пункт не найден')
-  -- Выйти из режима выделения, чтобы список снова работал как обычно.
-  local done = locate(DONE)
-  if done then done:click() end
+  -- Закрыть всплывшее меню, чтобы список снова работал как обычно.
+  pcall(sf.system.back)
 end
 
 sf.onActions(function(item)
