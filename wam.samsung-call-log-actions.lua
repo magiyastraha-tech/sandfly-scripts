@@ -10,7 +10,7 @@
 local manifest = {
   id = 'wam.samsung-call-log-actions',
   name = 'Телефон Samsung: действия в списках',
-  version = '1.1',
+  version = '1.2',
   author = 'Алёшка',
   minApiVersion = 1,
   testedApiVersion = 2,
@@ -107,11 +107,12 @@ local KINDS = {
     mainId = 'contact_list_item_main',
     expandedText = 'Контакт развёрнут',
     -- Внутри строки контакта ничего не меняется, поэтому признак только один:
-    -- блок с номером и кнопками под строкой.
+    -- блок с номером и кнопками под строкой. Первым идёт строка с номером:
+    -- она стоит вплотную к строке и находится быстрее всего.
     markers = {},
     below = {
-      { id = 'expand_item_call' },
       { id = 'expand_item_phone_container' },
+      { id = 'expand_item_call' },
     },
     actions = {
       {
@@ -198,21 +199,37 @@ local function markedExpanded(kind, row)
   return nil
 end
 
--- Блок развёрнутой строки лежит не внутри неё, а сразу под ней. Ищем его
--- элементы в узком окне ниже нижней границы строки: у соседней развёрнутой
--- строки такой блок начинается только после следующей строки и в окно не
--- попадает. Так кнопки соседа не перепутаются с нашими.
-local function blockBelow(row, queries, maxQueries)
+-- Блок развёрнутой строки лежит не внутри неё, а сразу под ней. Верхняя
+-- граница поиска — следующая строка того же списка: всё, что между ними,
+-- принадлежит нашей строке, а кнопки соседа за эту границу не выходят.
+local function windowLimit(kind, row)
+  local bottom = row.bounds and row.bounds.bottom
+  if not bottom then return nil end
+  local ok, rows = pcall(function() return sf.screen.findAll({ id = kind.rowId }, 50) end)
+  local limit
+  if ok and type(rows) == 'table' then
+    for _, candidate in ipairs(rows) do
+      local top = candidate.bounds and candidate.bounds.top
+      if top and top > bottom - 1 and (limit == nil or top < limit) then
+        limit = top
+      end
+    end
+  end
+  return (limit or bottom + 400) - 1
+end
+
+local function blockBelow(row, queries, maxQueries, limit)
   local bounds = row.bounds
   if not bounds or not bounds.bottom then return false end
   local bottom = bounds.bottom
+  local reach = limit or (bottom + 400)
   for index, query in ipairs(queries) do
     if index > (maxQueries or #queries) then break end
     local ok, found = pcall(function() return sf.screen.findAll(query, 10) end)
     if ok and type(found) == 'table' then
       for _, item in ipairs(found) do
         local top = item.bounds and item.bounds.top
-        if top and top >= bottom - 40 and top <= bottom + 80 then
+        if top and top >= bottom - 40 and top <= reach then
           return true
         end
       end
@@ -221,11 +238,19 @@ local function blockBelow(row, queries, maxQueries)
   return false
 end
 
-local function expandedFor(kind, row, maxQueries)
+-- cheap — для хука фокуса: только первый признак и без перебора строк, иначе
+-- не уложиться в тридцать миллисекунд.
+local function expandedFor(kind, row, cheap)
   local state = actionState(row)
   if state ~= nil then return state end
   if markedExpanded(kind, row) then return true end
-  local ok, below = pcall(blockBelow, row, kind.below, maxQueries)
+  if cheap then
+    local bottom = row.bounds and row.bounds.bottom or 0
+    local ok, below = pcall(blockBelow, row, kind.below, 1, bottom + 140)
+    return ok and below or false
+  end
+  local okLimit, limit = pcall(windowLimit, kind, row)
+  local ok, below = pcall(blockBelow, row, kind.below, nil, okLimit and limit or nil)
   return ok and below or false
 end
 
@@ -250,12 +275,18 @@ end
 -- Находит пункт рядом с этой строкой: сначала внутри неё, потом на экране,
 -- выбирая ближайший к её нижней границе. Верхняя граница окна — та же, что
 -- у признака развёрнутости, поэтому чужие кнопки не подхватываются.
-local function near(row, queries, tries)
+local function near(kind, row, queries, tries)
   local ok, refreshed = pcall(function() return row:refresh() end)
   if ok and refreshed then row = refreshed end
   local bounds = row.bounds
   local top = bounds and bounds.top or 0
   local bottom = bounds and (bounds.bottom or bounds.top) or 0
+  local limit
+  if bounds then
+    local okLimit, computed = pcall(windowLimit, kind, row)
+    if okLimit then limit = computed end
+  end
+  local reach = limit or (bottom + 400)
   for attempt = 1, tries or 3 do
     for _, query in ipairs(queries) do
       local insideOk, inside = pcall(function() return row:find(query) end)
@@ -264,6 +295,9 @@ local function near(row, queries, tries)
     for _, query in ipairs(queries) do
       local foundOk, found = pcall(function() return sf.screen.findAll(query, 10) end)
       if foundOk and type(found) == 'table' and #found > 0 then
+        -- На экране такой элемент один — он и есть: даже если границы
+        -- отдались не так, как ожидалось, выбирать не из чего.
+        if #found == 1 then return found[1] end
         local best, bestDistance
         for _, candidate in ipairs(found) do
           local candidateTop = candidate.bounds and candidate.bounds.top
@@ -271,7 +305,7 @@ local function near(row, queries, tries)
             best = candidate
             break
           end
-          if candidateTop and candidateTop >= top and candidateTop <= bottom + 80 then
+          if candidateTop and candidateTop >= top and candidateTop <= reach then
             local distance = candidateTop - bottom
             if bestDistance == nil or distance < bestDistance then
               best, bestDistance = candidate, distance
@@ -331,7 +365,7 @@ local function perform(kind, row, action)
     return
   end
 
-  local target = near(row, action.queries, expanded and 4 or 5)
+  local target = near(kind, row, action.queries, expanded and 4 or 5)
   if target then
     press(target)
     return
@@ -359,7 +393,7 @@ end)
 sf.onFocus(function(item, text)
   local kind = kindFor(item)
   if not kind then return nil end
-  local ok, expanded = pcall(expandedFor, kind, item, 1)
+  local ok, expanded = pcall(expandedFor, kind, item, true)
   if ok and expanded then
     return { after = kind.expandedText }
   end
