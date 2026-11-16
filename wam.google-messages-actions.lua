@@ -11,11 +11,11 @@
 local manifest = {
   id = 'wam.google-messages-actions',
   name = 'Google Messages: действия с разговором',
-  version = '1.3',
+  version = '1.4',
   author = 'Алёшка',
   minApiVersion = 1,
   testedApiVersion = 1,
-  description = 'В меню действий каждого разговора в списке Google Messages добавляет пункты: отметить как прочитанное, удалить и добавить контакт. Скрипт удерживает разговор, открывает «Другие параметры» и нажимает нужный пункт. Кнопки ищутся и по русским, и по английским подписям.',
+  description = 'В меню действий каждого разговора в списке Google Messages добавляет пункты: отметить как прочитанное, удалить и добавить контакт. Отмечает только прочитанным; если разговор уже прочитан, скрипт говорит «Уже прочитано». Кнопки ищутся и по русским, и по английским подписям.',
   apps = { 'com.google.android.apps.messaging' },
   permissions = { 'screen', 'actions', 'speech', 'input', 'system' },
 }
@@ -36,14 +36,20 @@ local MORE = {
 local ACTIONS = {
   {
     title = 'Отметить как прочитанное',
+    -- Только чтение: непрочитанным скрипт не помечает никогда.
     queries = {
       { textContains = 'Отметить как прочитанное' },
       { textContains = 'Пометить как прочитанное' },
+      { textContains = 'Mark as read' },
+    },
+    -- Если в меню есть этот пункт, разговор ещё непрочитан; если нет — уже
+    -- прочитан, и скрипт так и говорит.
+    already = {
       { textContains = 'Отметить как непрочитанное' },
       { textContains = 'Пометить как непрочитанное' },
-      { textContains = 'Mark as read' },
       { textContains = 'Mark as unread' },
     },
+    alreadyText = 'Уже прочитано',
   },
   {
     title = 'Удалить разговор',
@@ -116,7 +122,11 @@ local function perform(row, action)
     target:click()
     return
   end
-  sf.speak(action.title .. ': пункт не найден')
+  if action.already and waitFor(action.already, 2) then
+    sf.speak(action.alreadyText)
+  else
+    sf.speak(action.title .. ': пункт не найден')
+  end
   -- Закрыть всплывшее меню, чтобы список снова работал как обычно.
   pcall(sf.system.back)
 end
