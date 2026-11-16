@@ -2,19 +2,18 @@
 -- Основа — скрипт google-messages-actions.lua (автор Surendra) из
 -- github.com/aaron-gh/sandfly-scripts, лицензия Apache License 2.0.
 -- Добавляет в меню действий каждого разговора в списке Google Messages пункты:
--- пометить как непрочитанное, удалить, отложить уведомления и добавить
--- контакт.
+-- пометить как непрочитанное, удалить и добавить контакт.
 -- Тексты для поиска кнопок даны и по-русски, и по-английски: скрипт работает
 -- при любом языке интерфейса приложения.
 
 local manifest = {
   id = 'wam.google-messages-actions',
   name = 'Google Messages: действия с разговором',
-  version = '1.1',
+  version = '1.2',
   author = 'Алёшка',
   minApiVersion = 1,
   testedApiVersion = 1,
-  description = 'В меню действий каждого разговора в списке Google Messages добавляет пункты: пометить как непрочитанное или прочитанное, удалить, отложить уведомления и добавить контакт. Кнопки ищутся и по русским, и по английским подписям.',
+  description = 'В меню действий каждого разговора в списке Google Messages добавляет пункты: пометить как непрочитанное или прочитанное, удалить и добавить контакт. Кнопки ищутся и по русским, и по английским подписям.',
   apps = { 'com.google.android.apps.messaging' },
   permissions = { 'screen', 'actions', 'speech', 'input' },
 }
@@ -50,15 +49,6 @@ local ACTIONS = {
     title = 'Удалить разговор',
     where = 'bar',
     queries = { { id = 'action_delete' } },
-  },
-  {
-    title = 'Отложить уведомления',
-    where = 'bar',
-    queries = {
-      { id = 'action_snooze' },
-      { textContains = 'Отложить' },
-      { textContains = 'Snooze' },
-    },
   },
   {
     title = 'Добавить контакт',
