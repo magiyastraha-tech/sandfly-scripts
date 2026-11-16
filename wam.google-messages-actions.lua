@@ -11,11 +11,11 @@
 local manifest = {
   id = 'wam.google-messages-actions',
   name = 'Google Messages: действия с разговором',
-  version = '1.6',
+  version = '1.7',
   author = 'Алёшка',
   minApiVersion = 1,
-  testedApiVersion = 1,
-  description = 'В меню действий каждого разговора в списке Google Messages добавляет пункты: отметить как прочитанное, удалить и добавить контакт. Отмечает только прочитанным; если разговор уже прочитан, скрипт говорит «Уже прочитано». После удаления сам жмёт кнопку в появившейся плашке — «Отправить в корзину». Нажатия идут без пауз, как в оригинальном скрипте: меню не успевает зачитаться вслух. Кнопки ищутся и по русским, и по английским подписям.',
+  testedApiVersion = 2,
+  description = 'В меню действий каждого разговора в списке Google Messages добавляет пункты: отметить как прочитанное, удалить и добавить контакт. Отмечает только прочитанным; если разговор уже прочитан, скрипт говорит «Уже прочитано». После удаления сам ищет и жмёт кнопку в появившейся плашке — «Отправить в корзину»: ищет её во всех окнах и нажимает даже кнопки, которые не понимают программное нажатие. Нажатия идут без пауз, как в оригинальном скрипте: меню не успевает зачитаться вслух. Кнопки ищутся и по русским, и по английским подписям.',
   apps = { 'com.google.android.apps.messaging' },
   permissions = { 'screen', 'actions', 'speech', 'input', 'system' },
 }
@@ -116,6 +116,47 @@ end
 -- Кнопка «Готово» режима выбора — как в оригинальном скрипте.
 local DONE = { { id = 'action_mode_close_button' } }
 
+-- Нажимает элемент. Обычное нажатие, а если элемент его не принял — тычок
+-- пальцем по нему: так срабатывают кнопки, которые не понимают программное
+-- нажатие.
+local function press(item)
+  local ok, clicked = pcall(function() return item:click() end)
+  if ok and clicked then return true end
+  local tapped = pcall(function() return item:tap() end)
+  return tapped
+end
+
+-- Плашка после удаления часто появляется не в том окне, что открытое меню:
+-- меню ещё не закрылось, а плашка уже внизу экрана приложения. Поэтому ищем
+-- кнопку и в активном окне, и во всех остальных.
+local function anyWindow(queries)
+  for _, query in ipairs(queries) do
+    local found = sf.screen.find(query)
+    if found then return clickable(found) end
+  end
+  local ok, windows = pcall(function() return sf.screen.windows() end)
+  if ok and type(windows) == 'table' then
+    for _, win in ipairs(windows) do
+      if win.root then
+        for _, query in ipairs(queries) do
+          local foundOk, found = pcall(function() return win.root:find(query) end)
+          if foundOk and found then return clickable(found) end
+        end
+      end
+    end
+  end
+  return nil
+end
+
+local function waitAnywhere(queries, tries)
+  for _ = 1, tries or 12 do
+    local found = anyWindow(queries)
+    if found then return found end
+    sf.sleep(150)
+  end
+  return nil
+end
+
 -- Выполняется, когда выбран пункт меню действий. Здесь можно ждать, поэтому
 -- sf.sleep разрешён.
 local function perform(row, action)
@@ -131,15 +172,15 @@ local function perform(row, action)
   if action.quick then target = waitFor(action.queries, 2) end
   if not target then
     local more = waitFor(MORE, 6)
-    if more then more:click() end
+    if more then press(more) end
     target = waitFor(action.queries, 8)
   end
   if target then
-    target:click()
+    press(target)
     -- Удаление подтверждаем сами: ждём плашку и жмём её кнопку.
     if action.confirm then
-      local confirm = waitFor(action.confirm, 10)
-      if confirm then confirm:click() end
+      local confirm = waitAnywhere(action.confirm, 14)
+      if confirm then press(confirm) end
     end
     return
   end
@@ -150,7 +191,7 @@ local function perform(row, action)
   end
   -- Выйти из режима выбора, как в оригинале: «Готово», иначе «назад».
   local done = locate(DONE)
-  if done then done:click() else pcall(sf.system.back) end
+  if done then press(done) else pcall(sf.system.back) end
 end
 
 sf.onActions(function(item)
