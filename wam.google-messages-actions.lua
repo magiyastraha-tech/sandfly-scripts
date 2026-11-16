@@ -11,11 +11,11 @@
 local manifest = {
   id = 'wam.google-messages-actions',
   name = 'Google Messages: действия с разговором',
-  version = '1.7',
+  version = '1.8',
   author = 'Алёшка',
   minApiVersion = 1,
   testedApiVersion = 2,
-  description = 'В меню действий каждого разговора в списке Google Messages добавляет пункты: отметить как прочитанное, удалить и добавить контакт. Отмечает только прочитанным; если разговор уже прочитан, скрипт говорит «Уже прочитано». После удаления сам ищет и жмёт кнопку в появившейся плашке — «Отправить в корзину»: ищет её во всех окнах и нажимает даже кнопки, которые не понимают программное нажатие. Нажатия идут без пауз, как в оригинальном скрипте: меню не успевает зачитаться вслух. Кнопки ищутся и по русским, и по английским подписям.',
+  description = 'В меню действий каждого разговора в списке Google Messages добавляет пункты: отметить как прочитанное, удалить и добавить контакт. Отмечает только прочитанным; если разговор уже прочитан, скрипт говорит «Уже прочитано». После удаления сам жмёт кнопку в диалоге «Отправить чат в корзину?»: ищет её по id android:id/button1, ищет и в остальных окнах и нажимает даже кнопки, которые не понимают программное нажатие. Подтверждение нажимается отдельной короткой задачей, иначе поиск не укладывается в две секунды, отпущенные на действие. Нажатия идут без пауз, как в оригинальном скрипте: меню не успевает зачитаться вслух. Кнопки ищутся и по русским, и по английским подписям.',
   apps = { 'com.google.android.apps.messaging' },
   permissions = { 'screen', 'actions', 'speech', 'input', 'system' },
 }
@@ -61,14 +61,17 @@ local ACTIONS = {
       { textContains = 'Delete' },
       { textContains = 'Удалить' },
     },
-    -- После удаления внизу вылезает плашка с кнопкой «Отправить в корзину»:
-    -- её тоже нажимаем, чтобы беседа ушла в корзину сразу.
+    -- После удаления открывается диалог «Отправить чат в корзину?» с кнопкой
+    -- «Отправить в корзину»: её тоже нажимаем, чтобы беседа ушла в корзину
+    -- сразу.
     confirm = {
+      { id = 'android:id/button1' },
       { textContains = 'Отправить в корзину' },
       { textContains = 'Переместить в корзину' },
       { textContains = 'Удалить в корзину' },
-      { textContains = 'В корзину' },
       { textContains = 'Move to trash' },
+      -- Последней: эта подпись есть и в заголовке диалога.
+      { textContains = 'В корзину' },
     },
   },
   {
@@ -126,9 +129,9 @@ local function press(item)
   return tapped
 end
 
--- Плашка после удаления часто появляется не в том окне, что открытое меню:
--- меню ещё не закрылось, а плашка уже внизу экрана приложения. Поэтому ищем
--- кнопку и в активном окне, и во всех остальных.
+-- Диалог подтверждения может оказаться не в том окне, что открытое меню:
+-- меню ещё не закрылось, а диалог уже открыт. Поэтому ищем кнопку и в
+-- активном окне, и во всех остальных.
 local function anyWindow(queries)
   for _, query in ipairs(queries) do
     local found = sf.screen.find(query)
@@ -149,12 +152,40 @@ local function anyWindow(queries)
 end
 
 local function waitAnywhere(queries, tries)
-  for _ = 1, tries or 12 do
+  for _ = 1, tries or 4 do
     local found = anyWindow(queries)
     if found then return found end
     sf.sleep(150)
   end
   return nil
+end
+
+-- Нажимает кнопку подтверждения удаления. Это отдельная задача-таймер: у
+-- каждого вызова в скрипт свои две секунды, поэтому долгий поиск здесь не
+-- обрывает основной вызов действия.
+local function pressConfirm(queries)
+  local ok, item = pcall(function()
+    return sf.screen.waitFor({ id = 'android:id/button1' }, 800, 100)
+  end)
+  if ok and item then
+    press(clickable(item))
+    return true
+  end
+  local found = waitAnywhere(queries, 3)
+  if found then
+    press(found)
+    return true
+  end
+  return false
+end
+
+-- Пробует нажать подтверждение через delay миллисекунд, и ещё несколько раз,
+-- если диалог не успел открыться: он появляется не мгновенно.
+local function confirmLater(queries, delay, attempts)
+  sf.setTimeout(function()
+    if pressConfirm(queries) then return end
+    if attempts > 1 then confirmLater(queries, 900, attempts - 1) end
+  end, delay)
 end
 
 -- Выполняется, когда выбран пункт меню действий. Здесь можно ждать, поэтому
@@ -171,17 +202,16 @@ local function perform(row, action)
   local target
   if action.quick then target = waitFor(action.queries, 2) end
   if not target then
-    local more = waitFor(MORE, 6)
+    local more = waitFor(MORE, 4)
     if more then press(more) end
-    target = waitFor(action.queries, 8)
+    target = waitFor(action.queries, 6)
   end
   if target then
     press(target)
-    -- Удаление подтверждаем сами: ждём плашку и жмём её кнопку.
-    if action.confirm then
-      local confirm = waitAnywhere(action.confirm, 14)
-      if confirm then press(confirm) end
-    end
+    -- Удаление подтверждаем сами: диалог «Отправить чат в корзину?» и его
+    -- кнопку жмём отдельной задачей. У вызова действия всего две секунды, и
+    -- поиск кнопки в них не укладывался — скрипт молча обрывался.
+    if action.confirm then confirmLater(action.confirm, 350, 3) end
     return
   end
   if action.already and waitFor(action.already, 2) then
