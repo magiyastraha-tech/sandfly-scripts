@@ -11,11 +11,11 @@
 local manifest = {
   id = 'wam.google-messages-actions',
   name = 'Google Messages: действия с разговором',
-  version = '1.5',
+  version = '1.6',
   author = 'Алёшка',
   minApiVersion = 1,
   testedApiVersion = 1,
-  description = 'В меню действий каждого разговора в списке Google Messages добавляет пункты: отметить как прочитанное, удалить и добавить контакт. Отмечает только прочитанным; если разговор уже прочитан, скрипт говорит «Уже прочитано». После удаления сам жмёт кнопку в появившейся плашке — «Отправить в корзину». Кнопки ищутся и по русским, и по английским подписям.',
+  description = 'В меню действий каждого разговора в списке Google Messages добавляет пункты: отметить как прочитанное, удалить и добавить контакт. Отмечает только прочитанным; если разговор уже прочитан, скрипт говорит «Уже прочитано». После удаления сам жмёт кнопку в появившейся плашке — «Отправить в корзину». Нажатия идут без пауз, как в оригинальном скрипте: меню не успевает зачитаться вслух. Кнопки ищутся и по русским, и по английским подписям.',
   apps = { 'com.google.android.apps.messaging' },
   permissions = { 'screen', 'actions', 'speech', 'input', 'system' },
 }
@@ -53,6 +53,7 @@ local ACTIONS = {
   },
   {
     title = 'Удалить разговор',
+    quick = true,
     queries = {
       { textContains = 'Удалить разговор' },
       { textContains = 'Удалить беседу' },
@@ -112,6 +113,9 @@ local function waitFor(queries, tries)
   return nil
 end
 
+-- Кнопка «Готово» режима выбора — как в оригинальном скрипте.
+local DONE = { { id = 'action_mode_close_button' } }
+
 -- Выполняется, когда выбран пункт меню действий. Здесь можно ждать, поэтому
 -- sf.sleep разрешён.
 local function perform(row, action)
@@ -120,10 +124,13 @@ local function perform(row, action)
     sf.speak('Не получилось удержать разговор')
     return
   end
-  -- Иногда нужный пункт лежит прямо во всплывшем меню.
-  local target = waitFor(action.queries, 4)
+  -- Как в оригинале: сразу нужный пункт, и только если его нет — «Другие
+  -- параметры». Без долгих поисков и пауз, чтобы меню закрылось раньше, чем
+  -- диктор успеет его зачитать.
+  local target
+  if action.quick then target = waitFor(action.queries, 2) end
   if not target then
-    local more = waitFor(MORE, 8)
+    local more = waitFor(MORE, 6)
     if more then more:click() end
     target = waitFor(action.queries, 8)
   end
@@ -141,8 +148,9 @@ local function perform(row, action)
   else
     sf.speak(action.title .. ': пункт не найден')
   end
-  -- Закрыть всплывшее меню, чтобы список снова работал как обычно.
-  pcall(sf.system.back)
+  -- Выйти из режима выбора, как в оригинале: «Готово», иначе «назад».
+  local done = locate(DONE)
+  if done then done:click() else pcall(sf.system.back) end
 end
 
 sf.onActions(function(item)
