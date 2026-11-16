@@ -10,7 +10,7 @@
 local manifest = {
   id = 'wam.samsung-call-log-actions',
   name = 'Телефон Samsung: действия в списках',
-  version = '1.2',
+  version = '1.3',
   author = 'Алёшка',
   minApiVersion = 1,
   testedApiVersion = 2,
@@ -147,8 +147,12 @@ local KINDS = {
   },
 }
 
+local function idTail(id)
+  return string.match(id or '', '[^/]*$')
+end
+
 local function shortId(item)
-  return string.match(item and item.id or '', '[^/]*$')
+  return idTail(item and item.id or '')
 end
 
 local function kindFor(item)
@@ -166,6 +170,13 @@ local function press(item)
   if ok and clicked then return true end
   local tappedOk, tapped = pcall(function() return item:tap() end)
   return tappedOk and tapped == true
+end
+
+-- Новый снимок строки: после нажатия старый снимок ещё помнит прежний экран.
+local function fresh(item)
+  local ok, refreshed = pcall(function() return item:refresh() end)
+  if ok and refreshed then return refreshed end
+  return item
 end
 
 local function hasAction(item, names)
@@ -199,9 +210,42 @@ local function markedExpanded(kind, row)
   return nil
 end
 
--- Блок развёрнутой строки лежит не внутри неё, а сразу под ней. Верхняя
--- граница поиска — следующая строка того же списка: всё, что между ними,
--- принадлежит нашей строке, а кнопки соседа за эту границу не выходят.
+-- Развёрнутый блок — это соседи строки в том же списке, до следующей строки
+-- или до заголовка группы. Так видно, что блок принадлежит именно этой строке:
+-- координаты экрана тут ни при чём, и ошибиться соседом нельзя.
+local function blockOf(kind, row)
+  local okParent, parent = pcall(function() return row:parent() end)
+  if not okParent or not parent then return nil end
+  local okKids, kids = pcall(function() return parent:children() end)
+  if not okKids or type(kids) ~= 'table' then return nil end
+  local top = row.bounds and row.bounds.top
+  local index
+  for i, child in ipairs(kids) do
+    if shortId(child) == kind.rowId then
+      local childTop = child.bounds and child.bounds.top
+      if top and childTop then
+        if math.abs(childTop - top) <= 2 then
+          index = i
+          break
+        end
+      elseif child.focused then
+        index = i
+        break
+      end
+    end
+  end
+  if not index then return nil end
+  local siblings = {}
+  for i = index + 1, #kids do
+    local child = kids[i]
+    if shortId(child) == kind.rowId or child.heading then break end
+    siblings[#siblings + 1] = child
+  end
+  return siblings
+end
+
+-- Запасной путь: верхняя граница поиска по экрану — начало следующей строки
+-- того же списка, а если её не нашлось, четыреста точек ниже строки.
 local function windowLimit(kind, row)
   local bottom = row.bounds and row.bounds.bottom
   if not bottom then return nil end
@@ -238,19 +282,19 @@ local function blockBelow(row, queries, maxQueries, limit)
   return false
 end
 
--- cheap — для хука фокуса: только первый признак и без перебора строк, иначе
--- не уложиться в тридцать миллисекунд.
+-- cheap — для хука фокуса: без обхода списка и только первый признак, иначе
+-- не уложиться в тридцать миллисекунд. Список действий доступности проверяется
+-- последним: у старой копии строки он может врать про раскрытие.
 local function expandedFor(kind, row, cheap)
+  if markedExpanded(kind, row) then return true end
+  if not cheap then
+    local okBlock, siblings = pcall(blockOf, kind, row)
+    if okBlock and type(siblings) == 'table' and #siblings > 0 then return true end
+  end
   local state = actionState(row)
   if state ~= nil then return state end
-  if markedExpanded(kind, row) then return true end
-  if cheap then
-    local bottom = row.bounds and row.bounds.bottom or 0
-    local ok, below = pcall(blockBelow, row, kind.below, 1, bottom + 140)
-    return ok and below or false
-  end
-  local okLimit, limit = pcall(windowLimit, kind, row)
-  local ok, below = pcall(blockBelow, row, kind.below, nil, okLimit and limit or nil)
+  local bottom = row.bounds and row.bounds.bottom or 0
+  local ok, below = pcall(blockBelow, row, kind.below, cheap and 1 or nil, bottom + (cheap and 200 or 150))
   return ok and below or false
 end
 
@@ -260,24 +304,27 @@ end
 -- сказать, что не вышло, чем нажать что-то не то.
 local function ensureExpanded(kind, row)
   if expandedFor(kind, row) then return true end
+  -- Снимок мог устареть: проверяем ещё раз на свежем, прежде чем нажимать.
+  -- Иначе уже развёрнутая строка получит нажатие и свернётся обратно.
+  row = fresh(row)
+  if expandedFor(kind, row) then return true end
   if hasAction(row, EXPAND_ACTIONS) then
     local ok, done = pcall(function() return row:perform('expand') end)
     if ok and done then
       sf.sleep(350)
-      if expandedFor(kind, row) then return true end
+      if expandedFor(kind, fresh(row)) then return true end
     end
   end
   if not press(row) then return false end
   sf.sleep(450)
-  return expandedFor(kind, row)
+  return expandedFor(kind, fresh(row))
 end
 
--- Находит пункт рядом с этой строкой: сначала внутри неё, потом на экране,
--- выбирая ближайший к её нижней границе. Верхняя граница окна — та же, что
--- у признака развёрнутости, поэтому чужие кнопки не подхватываются.
+-- Ищет пункт в блоке под этой строкой. Сначала — среди соседей строки в
+-- списке: там блок и лежит, и координаты экрана для этого не нужны. Если
+-- соседей не видно, ищет по экрану в окне до следующей строки списка.
 local function near(kind, row, queries, tries)
-  local ok, refreshed = pcall(function() return row:refresh() end)
-  if ok and refreshed then row = refreshed end
+  row = fresh(row)
   local bounds = row.bounds
   local top = bounds and bounds.top or 0
   local bottom = bounds and (bounds.bottom or bounds.top) or 0
@@ -288,6 +335,18 @@ local function near(kind, row, queries, tries)
   end
   local reach = limit or (bottom + 400)
   for attempt = 1, tries or 3 do
+    local blockOk, siblings = pcall(blockOf, kind, row)
+    if blockOk and type(siblings) == 'table' then
+      for _, query in ipairs(queries) do
+        for _, sibling in ipairs(siblings) do
+          if query.id and idTail(query.id) == shortId(sibling) then
+            return sibling
+          end
+          local insideOk, inside = pcall(function() return sibling:find(query) end)
+          if insideOk and inside then return inside end
+        end
+      end
+    end
     for _, query in ipairs(queries) do
       local insideOk, inside = pcall(function() return row:find(query) end)
       if insideOk and inside then return inside end
@@ -360,14 +419,25 @@ local function perform(kind, row, action)
     end
   end
 
-  if not expanded and not ensureExpanded(kind, row) then
-    sf.speak('Не получилось развернуть строку')
-    return
+  local target
+  if expanded then
+    target = near(kind, row, action.queries, 4)
+  elseif ensureExpanded(kind, row) then
+    target = near(kind, row, action.queries, 5)
   end
-
-  local target = near(kind, row, action.queries, expanded and 4 or 5)
+  -- Блок мог уже появиться, а подтверждение развёрнутости — нет: у контактов
+  -- признак берётся по соседям строки, и сразу после нажатия снимок иногда
+  -- ещё старый. Если кнопки на месте, работаем с ними, а не говорим об ошибке.
+  if not target then
+    sf.sleep(300)
+    target = near(kind, row, action.queries, 1)
+  end
   if target then
     press(target)
+    return
+  end
+  if not expanded and not expandedFor(kind, row) then
+    sf.speak('Не получилось развернуть строку')
     return
   end
   sf.speak(action.absentText or (action.title .. ': пункт не найден'))
@@ -394,8 +464,11 @@ sf.onFocus(function(item, text)
   local kind = kindFor(item)
   if not kind then return nil end
   local ok, expanded = pcall(expandedFor, kind, item, true)
-  if ok and expanded then
-    return { after = kind.expandedText }
+  if not ok or not expanded then return nil end
+  -- Текст возвращается целиком, вместе с пометкой: дописывание к чужому
+  -- тексту через after в некоторых сборках теряет сам текст строки.
+  if text and text ~= '' then
+    return { speak = text .. ' ' .. kind.expandedText }
   end
-  return nil
+  return { speak = kind.expandedText }
 end)
