@@ -29,6 +29,11 @@
 -- в английском — Open Voice Transcription / Show transcript. Поэтому ищем по
 -- обрывку слова, а не по точному тексту.
 --
+-- Версия 1.16: в каналах с обсуждением кнопка комментариев называется
+-- «Прокомментировать», а не «39 комментариев»: раньше скрипт её не узнавал, и
+-- пункт «Комментарии» в меню сообщения не появлялся. Теперь узнаётся и такая
+-- надпись — и в свайпе кнопка убирается, и в меню возвращается.
+--
 -- Версия 1.15: возврат к состоянию 1.11 — пункт «Сохранить в загрузки»
 -- убран целиком. Номер выше прежнего, чтобы SandFly обновил скрипт из
 -- источника: версию с меньшим номером он бы пропустил.
@@ -103,7 +108,7 @@
 local manifest = {
   id = 'wam.nekogram-actions',
   name = 'Slonobass Nekogram',
-  version = '1.15',
+  version = '1.16',
   author = 'Алёшка',
   minApiVersion = 2,
   testedApiVersion = 5,
@@ -180,6 +185,16 @@ local manifest = {
       },
       hide = true,
     },
+    -- «Прокомментировать» — другая надпись той же кнопки: в каналах с
+    -- обсуждением она называется так, а не «39 комментариев».
+    {
+      match = {
+        className = 'Button',
+        textContains = 'омментир',
+        inside = { role = 'list' },
+      },
+      hide = true,
+    },
     -- Только Button: иначе правило задевает само сообщение, в тексте которого
     -- встретилось слово «расшифровка».
     {
@@ -209,6 +224,8 @@ local manifest = {
 local COMMENT_QUERIES = {
   { className = 'Button', textContains = 'комментар' },
   { className = 'Button', textContains = 'omment' },
+  -- «Прокомментировать»: так кнопка называется в каналах с обсуждением.
+  { className = 'Button', textContains = 'омментир' },
 }
 local SHARE_QUERIES = {
   { className = 'ImageButton', contentDescription = 'Поделиться' },
@@ -988,4 +1005,4 @@ sf.onCommand('focus_chats', function()
   end
 end)
 
-print('Nekogram: кнопки сообщений в Actions, версия 1.15 загружена')
+print('Nekogram: кнопки сообщений в Actions, версия 1.16 загружена')
