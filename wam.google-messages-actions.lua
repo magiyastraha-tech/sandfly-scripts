@@ -11,11 +11,19 @@
 local manifest = {
   id = 'wam.google-messages-actions',
   name = 'Google Messages: действия с разговором',
-  version = '1.8',
+  version = '1.9',
   author = 'Алёшка',
   minApiVersion = 1,
   testedApiVersion = 2,
-  description = 'В меню действий каждого разговора в списке Google Messages добавляет пункты: отметить как прочитанное, удалить и добавить контакт. Отмечает только прочитанным; если разговор уже прочитан, скрипт говорит «Уже прочитано». После удаления сам жмёт кнопку в диалоге «Отправить чат в корзину?»: ищет её по id android:id/button1, ищет и в остальных окнах и нажимает даже кнопки, которые не понимают программное нажатие. Подтверждение нажимается отдельной короткой задачей, иначе поиск не укладывается в две секунды, отпущенные на действие. Нажатия идут без пауз, как в оригинальном скрипте: меню не успевает зачитаться вслух. Кнопки ищутся и по русским, и по английским подписям.',
+  settings = {
+    {
+      key = 'focusFirstChat',
+      type = 'switch',
+      title = 'При запуске ставить фокус на первый чат',
+      default = true,
+    },
+  },
+  description = 'При входе в приложение ставит фокус на первый чат в списке, если открыт именно список: когда разговор уже открыт или приложение просто вернулось из чата, фокус не трогается. В меню действий каждого разговора в списке Google Messages добавляет пункты: отметить как прочитанное, удалить и добавить контакт. Отмечает только прочитанным; если разговор уже прочитан, скрипт говорит «Уже прочитано». После удаления сам жмёт кнопку в диалоге «Отправить чат в корзину?»: ищет её по id android:id/button1, ищет и в остальных окнах и нажимает даже кнопки, которые не понимают программное нажатие. Подтверждение нажимается отдельной короткой задачей, иначе поиск не укладывается в две секунды, отпущенные на действие. Нажатия идут без пауз, как в оригинальном скрипте: меню не успевает зачитаться вслух. Кнопки ищутся и по русским, и по английским подписям.',
   apps = { 'com.google.android.apps.messaging' },
   permissions = { 'screen', 'actions', 'speech', 'input', 'system' },
 }
@@ -231,4 +239,101 @@ sf.onActions(function(item)
     list[#list + 1] = { title = action.title, run = function() perform(item, action) end }
   end
   return list
+end)
+
+-- ── Фокус на первый чат при входе в приложение ──
+--
+-- onAppEnter срабатывает, когда приложение выходит на передний план, а не
+-- при переходе между экранами внутри него. Поэтому при выходе из чата назад
+-- в список этот код не запускается и фокус остаётся там, где был. На случай,
+-- если событие всё же придёт, когда открыт разговор, перед переводом
+-- проверяем, что на экране действительно список.
+
+local LIST_ID = 'list'
+local FOCUS_TRIES = 4
+local FOCUS_STEP = 300
+
+local function listNode()
+  local ok, list = pcall(function()
+    return sf.screen.find({ id = LIST_ID })
+  end)
+  if ok then return list end
+  return nil
+end
+
+-- Фокус уже внутри списка — значит, приложение само его восстановило, и
+-- переводить не нужно.
+local function focusInList(list)
+  local cur = sf.screen.focused()
+  for _ = 1, 12 do
+    if not cur then return false end
+    if cur == list then return true end
+    cur = cur:parent()
+  end
+  return false
+end
+
+-- Первая строка списка: верхний разговор. Ловим строки с подписью, а не
+-- служебные пустые узлы.
+local function firstConversation(list)
+  local ok, rows = pcall(function()
+    return list:findAll({ focusable = true }, 40)
+  end)
+  if not ok or not rows then return nil end
+  local fallback = nil
+  for _, row in ipairs(rows) do
+    if row.visible then
+      local label = row.text
+      if label == nil or label == '' then
+        label = row.contentDescription
+      end
+      if label ~= nil and label ~= '' then
+        if not fallback then fallback = row end
+        if row.collectionItem then return row end
+      end
+    end
+  end
+  return fallback
+end
+
+-- Один и тот же элемент из двух запросов — разные объекты, поэтому сравниваем
+-- по подписи и классу.
+local function sameItem(a, b)
+  if not a or not b then return false end
+  if a == b then return true end
+  local at = a.text or a.contentDescription
+  local bt = b.text or b.contentDescription
+  return at == bt and a.className == b.className
+end
+
+local function focusFirstChat()
+  sf.run(function()
+    -- Ждём, пока список отрисуется: при входе приложение стартует не мгновенно.
+    local list = sf.screen.waitFor({ id = LIST_ID }, 2500, 250)
+    if not list then return end
+    if sf.settings.get('focusFirstChat') == false then return end
+    -- Приложение дорисовывает экран уже после нас и может увести фокус на
+    -- заголовок сверху, поэтому несколько попыток с проверкой. Если фокус уже
+    -- стоит на первом чате, не трогаем: иначе строка зачитается дважды.
+    for _ = 1, FOCUS_TRIES do
+      local current = listNode()
+      if not current then return end
+      local row = firstConversation(current)
+      if row and sameItem(sf.screen.focused(), row) then return end
+      if row then
+        pcall(function() row:showOnScreen() end)
+        pcall(function() row:focus() end)
+      else
+        pcall(function() current:focus() end)
+      end
+      sf.sleep(FOCUS_STEP)
+      if row and sameItem(sf.screen.focused(), row) then return end
+      -- SandFly может отдать фокус контейнеру строки — это тоже попадание.
+      if row and focusInList(current) then return end
+    end
+  end)
+end
+
+sf.onAppEnter(function()
+  focusFirstChat()
 end)
