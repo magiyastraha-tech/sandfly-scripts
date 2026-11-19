@@ -13,7 +13,7 @@
 
 local manifest = {
   id = 'wam.tele2-summary',
-  name = 'Теле2: сводка по счёту',
+  name = 'Slonobass Теле2',
   author = 'Лия, WAM Agents',
   version = '1.6',
   minApiVersion = 2,

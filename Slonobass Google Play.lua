@@ -7,7 +7,7 @@
 
 local manifest = {
   id = 'wam.google-play-updates-focus',
-  name = 'Google Play: фокус на обновления',
+  name = 'Slonobass Google Play',
   author = 'Алёшка',
   version = '1.0',
   minApiVersion = 2,

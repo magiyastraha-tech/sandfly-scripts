@@ -24,7 +24,7 @@ SandFly раз в день сам проверяет, не вышла ли но�
 
 ## Какие скрипты есть
 
-**ymusic.video_rows.lua** — для YMusic (io.ymusic.android), id `ymusic.video_rows`.
+**Slonobass YMusic** — для YMusic (io.ymusic.android), id `ymusic.video_rows`.
 
 В списках строка видео, клипа и трансляции читает только название и время. В
 меню действий три пункта: «Канал: …», «Остальное: …» с просмотрами и датой
@@ -42,7 +42,7 @@ SandFly раз в день сам проверяет, не вышла ли но�
 когда опубликовано, или и то и другое; переключатель «Короткая строка», чтобы
 вернуть прежний вид; переключатель «Фокус на «Новые»».
 
-**wam.tele2-summary.lua** — для приложения «Мой Теле2» (ru.tele2.mytele2),
+**Slonobass Теле2** — для приложения «Мой Теле2» (ru.tele2.mytele2),
 id `wam.tele2-summary`.
 
 Одной командой (жест `sf` плюс `s`, либо через меню команд) читает номер,
@@ -60,7 +60,7 @@ id `wam.tele2-summary`.
 Требует Android 11 и новее. Добавляет около секунды. И переключатель
 «Фокус на блок с номером» — можно выключить автоматический фокус.
 
-**wam.nekogram-actions.lua** — для Nekogram (tw.nekomimi.nekogram),
+**Slonobass Nekogram** — для Nekogram (tw.nekomimi.nekogram),
 id `wam.nekogram-actions`.
 
 Убирает из свайпа по сообщениям кнопку «Комментарии», кнопку «Поделиться» и
@@ -116,7 +116,7 @@ id `wam.nekogram-actions`.
 идентификатор, и SandFly будет держать оба скрипта сразу, а пункты меню
 задвоятся.
 
-**wam.translator.lua** — переводчик текста в любом приложении,
+**Slonobass Переводчик** — переводчик текста в любом приложении,
 id `wam.translator`.
 
 Команда «Перевести текст на выбранный язык» есть только в главном меню
@@ -150,7 +150,7 @@ id `wam.translator`.
 «Вставлять перевод обратно в поле ввода» и «Копировать перевод в буфер
 обмена».
 
-**wam.google-messages-actions.lua** — для Google Messages
+**Slonobass Google Messages** — для Google Messages
 (com.google.android.apps.messaging), id `wam.google-messages-actions`.
 
 В меню действий каждого разговора в списке добавляет три пункта: «Отметить
@@ -193,7 +193,7 @@ id `wam.translator`.
 неподписанный, и отметьте его как изменённый — обновления из источника могут
 не приходить сами.
 
-**wam.samsung-call-log-actions.lua** — для штатного телефона Samsung
+**Slonobass Телефон Samsung** — для штатного телефона Samsung
 (com.samsung.android.dialer), id `wam.samsung-call-log-actions`.
 
 Один скрипт на два списка телефона: журнал вызовов и вкладку «Контакты». Сам
@@ -225,7 +225,7 @@ id `wam.translator`.
 Имя файла и id остались прежними: так уже установленный скрипт обновится сам, а
 не задвоит пункты меню рядом со старой версией.
 
-**samsung-email-delete-action.lua** — для штатной почты Samsung
+**Slonobass Почта Samsung** — для штатной почты Samsung
 (com.samsung.android.email.provider), id `samsung-email-delete-action`.
 
 В меню действий каждого письма в списке появляется пункт «Удалить письмо», а
@@ -254,7 +254,7 @@ id `wam.translator`.
 Имя файла совпадает с id намеренно: прежняя версия скрипта (тоже с id
 `samsung-email-delete-action`) обновится сама, а не задвоит пункт меню.
 
-**wam.google-play-updates-focus.lua** — для Google Play (com.android.vending),
+**Slonobass Google Play** — для Google Play (com.android.vending),
 id `wam.google-play-updates-focus`.
 
 На экране «Управление устройством и приложениями» фокус сам встаёт на строку
@@ -272,7 +272,7 @@ id `wam.google-play-updates-focus`.
 В настройках скрипта переключатель «Фокус на обновления»; в меню команд есть
 ручной переход «Перейти к обновлениям».
 
-**filemanager-select.lua** — для файлового менеджера «Файловый менеджер +»
+**Slonobass Файловый менеджер** — для файлового менеджера «Файловый менеджер +»
 (com.alphainventor.filemanager), id `filemanager-select`.
 
 Кнопка выбора рядом с каждой строкой списка убрана из обхода свайпами: на
@@ -313,7 +313,7 @@ id `wam.google-play-updates-focus`.
 Имя файла и id совпадают намеренно: так версия, установленная вручную, потом
 обновится с источника, а не задвоит пункты меню.
 
-**cyberportal-vpn.lua** — для «КИБЕРПОРТАЛ БС» (com.cybportal.bs), id `cyberportal-vpn`.
+**Slonobass КИБЕРПОРТАЛ БС** — для «КИБЕРПОРТАЛ БС» (com.cybportal.bs), id `cyberportal-vpn`.
 
 Версия 1.1 — под новый интерфейс приложения. Главный экран причёсан под слух:
 декоративные надписи «КИБЕРПОРТАЛ // БС», «КИБЕРПОРТАЛ», «СТАРТ», «УЗЕЛ», «N»
@@ -347,7 +347,7 @@ id `wam.google-play-updates-focus`.
 «ВПН: включить или отключить», «ВПН: сообщить состояние» и «ВПН: перейти к
 выбору сервера».
 
-**v2raytun-vpn.lua** — для v2RayTun (com.v2raytun.android), id `v2raytun-vpn`.
+**Slonobass v2RayTun** — для v2RayTun (com.v2raytun.android), id `v2raytun-vpn`.
 
 Главный экран приведён к одному действию. Переключатель ВПН — там он был
 RelativeLayout без имени, с лампочкой, у которой описание «v2RayTun», — стал

@@ -12,7 +12,7 @@
 
 local manifest = {
   id = 'v2raytun-vpn',
-  name = 'v2RayTun: доступность',
+  name = 'Slonobass v2RayTun',
   version = '1.0',
   author = 'magiyastraha',
   minApiVersion = 5,

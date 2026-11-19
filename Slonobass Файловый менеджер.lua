@@ -15,7 +15,7 @@
 
 local manifest = {
   id = 'filemanager-select',
-  name = 'Файловый менеджер +: действия с файлом',
+  name = 'Slonobass Файловый менеджер',
   version = '6.0',
   author = 'lawx',
   minApiVersion = 5,

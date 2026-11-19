@@ -9,7 +9,7 @@
 
 local manifest = {
   id = 'wam.samsung-call-log-actions',
-  name = 'Телефон Samsung: действия в списках',
+  name = 'Slonobass Телефон Samsung',
   version = '1.3',
   author = 'Алёшка',
   minApiVersion = 1,

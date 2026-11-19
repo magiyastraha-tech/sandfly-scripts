@@ -1,6 +1,6 @@
 local manifest = {
   id = 'wam.translator',
-  name = 'Переводчик',
+  name = 'Slonobass Переводчик',
   version = '2.2',
   author = 'Slonobass',
   minApiVersion = 4,

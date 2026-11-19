@@ -10,7 +10,7 @@
 
 local manifest = {
   id = 'wam.google-messages-actions',
-  name = 'Google Messages: действия с разговором',
+  name = 'Slonobass Google Messages',
   version = '1.9',
   author = 'Алёшка',
   minApiVersion = 1,

@@ -10,7 +10,7 @@
 
 local manifest = {
   id = 'samsung-email-delete-action',
-  name = 'Почта Samsung: удаление письма',
+  name = 'Slonobass Почта Samsung',
   version = '1.2',
   author = 'Алёшка',
   minApiVersion = 1,

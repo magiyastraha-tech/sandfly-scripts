@@ -4,7 +4,7 @@
 
 local manifest = {
   id = 'ymusic.video_rows',
-  name = 'YMusic: название и время',
+  name = 'Slonobass YMusic',
   author = 'Алёшка',
   version = '1.7',
   minApiVersion = 1,

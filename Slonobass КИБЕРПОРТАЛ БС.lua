@@ -14,7 +14,7 @@
 
 local manifest = {
   id = 'cyberportal-vpn',
-  name = 'КИБЕРПОРТАЛ БС: доступность',
+  name = 'Slonobass КИБЕРПОРТАЛ БС',
   version = '1.1',
   author = 'magiyastraha',
   minApiVersion = 5,

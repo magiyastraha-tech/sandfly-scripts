@@ -102,7 +102,7 @@
 
 local manifest = {
   id = 'wam.nekogram-actions',
-  name = 'Nekogram: кнопки сообщений в Actions',
+  name = 'Slonobass Nekogram',
   version = '1.15',
   author = 'Алёшка',
   minApiVersion = 2,
