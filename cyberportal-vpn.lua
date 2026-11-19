@@ -5,18 +5,21 @@
 -- а когда состояние меняется, скрипт говорит об этом сам — неважно, нажали
 -- переключатель, кнопку в меню действий или приложение подключилось само.
 --
--- Остальной экран тоже причёсан: декоративные надписи убраны из обхода,
--- строки выбора сервера читаются целиком, трафик произносится словами,
--- флаг из названия страны убран, вкладки и кнопка поддержки названы по-русски.
+-- Версия 1.1 — под новый интерфейс приложения: нижние вкладки переехали на
+-- land_nav_vpn и land_nav_settings, над переключателем появилась надпись
+-- «СТАРТ», в заголовке панели — «УЗЕЛ» и пинг узла, а трафика на главном
+-- экране больше нет. Причёсано всё остальное: декоративные надписи убраны из
+-- обхода, строки выбора сервера читаются целиком, режимы и страны названы
+-- по-русски, флаг из названия страны убран, вкладки названы словами.
 
 local manifest = {
   id = 'cyberportal-vpn',
   name = 'КИБЕРПОРТАЛ БС: доступность',
-  version = '1.0',
+  version = '1.1',
   author = 'magiyastraha',
   minApiVersion = 5,
   testedApiVersion = 5,
-  description = 'Один переключатель ВПН, который сам называет состояние и говорит о подключении и отключении. Убирает из обхода декоративные надписи и дублирующие элементы, читает строки списка серверов целиком, произносит трафик словами и называет вкладки по-русски.',
+  description = 'Один переключатель ВПН, который сам называет состояние и говорит о подключении и отключении. Убирает из обхода декоративные надписи и дублирующие элементы, читает строки списка серверов целиком, называет пинг узла и вкладки по-русски.',
   apps = { 'com.cybportal.bs' },
   permissions = { 'screen', 'actions', 'speech', 'input' },
   settings = {
@@ -35,12 +38,11 @@ local manifest = {
   },
   rules = {
     -- Декоративные надписи: в обходе они только мешают.
+    { match = { text = 'КИБЕРПОРТАЛ // БС' }, hide = true },
     { match = { text = 'CYBERPORTAL // BS' }, hide = true },
     { match = { text = 'КИБЕРПОРТАЛ' }, hide = true },
-    { match = { text = 'ACTION' }, hide = true },
-    { match = { text = '▸ TAP MODULE' }, hide = true },
-    { match = { text = 'TRAFFIC' }, hide = true },
-    { match = { text = 'EXIT NODE' }, hide = true },
+    { match = { text = 'УЗЕЛ' }, hide = true },
+    { id = 'action_panel_label', hide = true },
     { match = { text = 'N' }, hide = true },
 
     -- Номера режимов выбора сервера: «01» перед названием ничего не добавляет.
@@ -66,6 +68,7 @@ local manifest = {
     { id = 'bottom_sheet_header', label = 'Выбор сервера', group = true },
 
     -- Заголовки списков — заголовки, чтобы по ним можно было прыгать.
+    { match = { text = 'Режим выбора сервера' }, heading = true },
     { id = 'countries_header', heading = true },
     { id = 'servers_header', heading = true },
 
@@ -90,9 +93,14 @@ local manifest = {
       hint = 'Проведите двумя пальцами, чтобы прокрутить',
     },
 
-    -- Вкладки внизу.
-    { id = 'navigation_vpn', label = 'Вкладка ВПН' },
-    { id = 'navigation_settings', label = 'Вкладка Настройки' },
+    -- Вкладки внизу: сама вкладка названа словами, а картинка и подпись
+    -- внутри неё — дубли, их из обхода убираем.
+    { id = 'land_nav_vpn', label = 'Вкладка ВПН' },
+    { id = 'land_nav_settings', label = 'Вкладка Настройки' },
+    { match = { text = 'VPN', inside = { id = 'land_nav_vpn' } }, hide = true },
+    { match = { contentDescription = 'VPN', inside = { id = 'land_nav_vpn' } }, hide = true },
+    { match = { text = 'НАСТРОЙКИ', inside = { id = 'land_nav_settings' } }, hide = true },
+    { match = { contentDescription = 'Настройки', inside = { id = 'land_nav_settings' } }, hide = true },
   },
   commands = {
     { id = 'vpn-toggle', title = 'ВПН: включить или отключить', menu = true },
@@ -102,6 +110,7 @@ local manifest = {
   navigation = {
     { title = 'ВПН: переключатель', id = 'vpn_toggle' },
     { title = 'ВПН: выбор сервера', id = 'bottom_sheet_header' },
+    { title = 'ВПН: режим выбора', match = { text = 'Режим выбора сервера' } },
     { title = 'ВПН: страны', id = 'countries_header' },
     { title = 'ВПН: серверы', id = 'servers_header' },
   },
@@ -113,7 +122,8 @@ local STATUS_ID = 'status_text'
 local HEADER_ID = 'bottom_sheet_header'
 local SERVER_NAME_ID = 'selected_server_name'
 local SERVER_COUNT_ID = 'selected_server_count'
-local COUNTRY_ID = 'connection_instruction'
+local PING_ID = 'exit_node_ping'
+local EXIT_HINT_ID = 'connection_instruction'
 local TRAFFIC_ID = 'traffic_stats_text'
 
 -- Состояние ВПН, последнее прочитанное с экрана: «Подключено», «Отключено»
@@ -126,6 +136,7 @@ local announced = nil
 
 local serverName = nil
 local serverCount = nil
+local ping = nil
 local country = nil
 
 -- Сколько ждём, пока приложение поменяет состояние на экране.
@@ -174,6 +185,17 @@ local function press(item)
   return false
 end
 
+-- В новом интерфейсе перед подсказкой появилась стрелка «◀». В UTF-8 это
+-- три байта, и диктор читает их как «треугольник», если не убрать.
+local ARROW_LEFT = '\226\151\128'
+local ARROW_RIGHT = '\226\150\184'
+
+local function stripArrows(value)
+  value = value:gsub('^' .. ARROW_LEFT .. '%s*', '')
+  value = value:gsub('^' .. ARROW_RIGHT .. '%s*', '')
+  return value
+end
+
 -- Флаг страны — два символа подряд из диапазона regional indicators, восемь
 -- байт в UTF-8. Android читает их по-разному, иногда никак; убираем.
 local function countryOf(text)
@@ -182,9 +204,25 @@ local function countryOf(text)
   if value:sub(1, 2) == '\240\159' and value:sub(5, 6) == '\240\159' then
     value = value:sub(9)
   end
-  value = trim(value)
+  value = trim(stripArrows(value))
   if value == '' then return nil end
   return value
+end
+
+-- Поле connection_instruction теперь двуликое: при подключении в нём страна
+-- выхода, а при отключении — подсказка «Нажми кнопку слева». Подсказку
+-- читаем как есть, без приставки «Страна».
+local function isHint(value)
+  if not value then return false end
+  return value:find('ажми', 1, true) ~= nil
+      or value:find('ыбер', 1, true) ~= nil
+      or value:find('ыбери', 1, true) ~= nil
+end
+
+-- Код сервера вроде «RU017» или «FI1»: рядом с названием он лишний.
+local function looksLikeCode(value)
+  if not value or value == '' then return false end
+  return value:match('^[%u%d%.%-]+$') ~= nil
 end
 
 local SIZE_UNITS = {
@@ -259,6 +297,25 @@ local function stateSpeech()
   return 'ВПН'
 end
 
+-- Заголовок панели называет выбранный режим или узел: «Надёжно, наиболее
+-- стабильный». Если вместо подписи стоит код сервера, он не нужен — название
+-- уже сказано.
+local function headerSpeech()
+  local parts = {}
+  if serverName and serverName ~= '' then
+    parts[#parts + 1] = serverName
+  end
+  if serverCount and serverCount ~= '' and serverCount ~= serverName
+      and not looksLikeCode(serverCount) then
+    parts[#parts + 1] = serverCount
+  end
+  if ping then
+    parts[#parts + 1] = 'пинг ' .. ping
+  end
+  if #parts == 0 then return nil end
+  return 'Выбор сервера: ' .. table.concat(parts, ', ')
+end
+
 local function announce(text)
   local message = msgFor(text)
   if not message or message == announced then return end
@@ -276,6 +333,11 @@ local function noteState(text)
   announce(text)
 end
 
+local function noteExit(text)
+  local value = countryOf(text)
+  if value and not isHint(value) then country = value end
+end
+
 -- Перечитывает всё, что живёт на экране, и запоминает без озвучивания:
 -- при открытии приложения пересказывать состояние незачем.
 local function refresh()
@@ -284,9 +346,21 @@ local function refresh()
     state = status
     announced = msgFor(status)
   end
-  serverName = textOf(SERVER_NAME_ID) or serverName
-  serverCount = textOf(SERVER_COUNT_ID) or serverCount
-  country = countryOf(textOf(COUNTRY_ID)) or country
+
+  local name = countryOf(textOf(SERVER_NAME_ID))
+  if name and not isHint(name) then serverName = name end
+
+  local count = trim(textOf(SERVER_COUNT_ID))
+  if count ~= '' then serverCount = count end
+
+  local latency = trim(textOf(PING_ID))
+  if latency ~= '' and latency ~= '—' then
+    ping = latency
+  else
+    ping = nil
+  end
+
+  noteExit(textOf(EXIT_HINT_ID))
 end
 
 -- Переключение ВПН. Нажатие идёт сразу, а результат ловится отдельно: пока
@@ -341,17 +415,33 @@ local function toggleVpn()
   look()
 end
 
--- При открытии приложение ставит фокус на строку состояния. Она скрыта, а
--- переключатель — рядом; переводим фокус на него, чтобы первое, что слышно,
--- было состояние и способы нажать.
+-- Есть ли у элемента настоящий фокус. У корня окна родителя нет, и его
+-- «фокус» — это просто отсутствие фокуса где-либо.
+local function hasRealFocus(item)
+  if not item then return false end
+  local parent = nil
+  pcall(function() parent = item:parent() end)
+  return parent ~= nil
+end
+
+-- При открытии приложение может оставить фокус где угодно или нигде. Если
+-- нигде или на скрытой строке состояния — переводим на переключатель, чтобы
+-- первое, что слышно, было состояние и способы нажать.
 local function focusToggle()
   if sf.settings.get('jump') == false then return end
-  local focused = sf.screen.focused()
-  if not focused or not hasId(focused, STATUS_ID) then return end
+
   local toggle = findById(TOGGLE_ID)
-  if toggle then
-    pcall(function() return toggle:focus() end)
+  if not toggle then return end
+
+  local focused = sf.screen.focused()
+  if focused and hasRealFocus(focused)
+      and not hasId(focused, STATUS_ID)
+      and not hasId(focused, TOGGLE_ID)
+      and not hasId(focused, POWER_ID) then
+    return
   end
+
+  pcall(function() return toggle:focus() end)
 end
 
 -- Голос элемента в фокусе. Всё, что здесь нужно, уже лежит в переменных:
@@ -366,20 +456,24 @@ sf.onFocus(function(item, text)
   end
 
   if hasId(item, HEADER_ID) then
-    if serverName and serverName ~= '' then
-      local speech = 'Выбор сервера: ' .. serverName
-      if serverCount and serverCount ~= '' then
-        speech = speech .. ', ' .. serverCount
-      end
-      return { speak = speech }
+    local speech = headerSpeech()
+    if speech then return { speak = speech } end
+    return nil
+  end
+
+  if hasId(item, PING_ID) then
+    local value = trim(item.text)
+    if value ~= '' and value ~= '—' then
+      return { speak = 'Пинг: ' .. value }
     end
     return nil
   end
 
-  if hasId(item, COUNTRY_ID) then
+  if hasId(item, EXIT_HINT_ID) then
     local value = countryOf(item.text) or country
-    if value then return { speak = 'Страна: ' .. value } end
-    return nil
+    if not value then return nil end
+    if isHint(value) then return { speak = value } end
+    return { speak = 'Страна: ' .. value }
   end
 
   if hasId(item, TRAFFIC_ID) then
@@ -400,12 +494,20 @@ sf.onContentChange(function(event)
   if hasId(node, STATUS_ID) then
     if node.text then noteState(node.text) end
   elseif hasId(node, SERVER_NAME_ID) then
-    if node.text then serverName = node.text end
+    local name = countryOf(node.text)
+    if name and not isHint(name) then serverName = name end
   elseif hasId(node, SERVER_COUNT_ID) then
-    if node.text then serverCount = node.text end
-  elseif hasId(node, COUNTRY_ID) then
-    local value = countryOf(node.text)
-    if value then country = value end
+    local count = trim(node.text)
+    if count ~= '' then serverCount = count end
+  elseif hasId(node, PING_ID) then
+    local latency = trim(node.text)
+    if latency ~= '' and latency ~= '—' then
+      ping = latency
+    else
+      ping = nil
+    end
+  elseif hasId(node, EXIT_HINT_ID) then
+    noteExit(node.text)
   end
 end)
 
