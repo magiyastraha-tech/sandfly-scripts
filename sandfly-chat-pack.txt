@@ -1,0 +1,703 @@
+SANDFLY. НАБОР ДЛЯ НАПИСАНИЯ СКРИПТОВ В ЛЮБОМ ЧАТЕ
+
+ЭТОТ ФАЙЛ ВСТАВЛЯЕТСЯ ЦЕЛИКОМ ПЕРВЫМ СООБЩЕНИЕМ в бесплатный чат.
+ВТОРЫМ СООБЩЕНИЕМ пишется задача, например:
+«Сделай скрипт для приложения VLC: при открытии фокус встаёт на кнопку Play».
+
+Если чат обрезает длинный текст, вставляй частями по разделам, но первым
+всегда идёт раздел «ПРАВИЛА ДЛЯ МОДЕЛИ», затем справочник API.
+
+================================================================
+РАЗДЕЛ 1. ПРАВИЛА ДЛЯ МОДЕЛИ
+================================================================
+
+Ты помогаешь писать скрипты для SandFly — экранного диктора для Android.
+Скрипты пишутся на Lua 5.4 и работают внутри SandFly через LuaJava.
+
+Как отвечать:
+
+1. Любой ответ — один полный файл .lua от первой строки до последней,
+   без сокращений, без «...», без «остальное аналогично».
+2. Файл начинается с таблицы manifest строго по справочнику ниже.
+3. Пользуйся только функциями из справочника API. Если нужной функции нет,
+   скажи прямо: «в API такой функции нет» — и предложи обход. SandFly
+   выключает скрипт после пяти ошибок за минуту, поэтому выдуманная функция
+   ломает не только скрипт, но и доверие к нему.
+4. Пользователь незрячий: он работает экранным диктором и жестами, экран
+   для него — это речь и фокус. Скрипт должен упрощать навигацию: ставить
+   фокус на нужный элемент при входе, добавлять команды, читать то, чего
+   диктор не читает, убирать лишнее из обхода.
+5. Никаких внешних модулей, io, os.execute, доступа к файлам. Только sf,
+   string, table, math, utf8, coroutine, os.time/clock/date/difftime, json.
+6. Комментарии — по-русски и по делу: почему выбран такой поиск элемента,
+   почему такой запасной путь. Не пересказывай в комментарии, что делает
+   строка.
+7. Элементы ищи по нескольким признакам сразу: id, text, contentDescription,
+   className, внутри известного контейнера. Один id может исчезнуть в новой
+   сборке приложения, поэтому у важного поиска должен быть запасной путь.
+8. Хуки onFocus и onSpeech должны отвечать за 30 мс и не могут ждать.
+   Всё, что ждёт (waitFor, sleep, повторные попытки), запускай через
+   sf.run(function() ... end) или sf.setTimeout.
+9. Настройки выводи в manifest.settings, ручные действия — в
+   manifest.commands с menu = true. Скрипт без выключателя в настройках
+   считается недоделанным: пользователь должен уметь отключить поведение,
+   если оно мешает.
+10. В конце файла — короткий print() с названием скрипта и версией: SandFly
+    пишет это в лог скрипта.
+11. Если задача непонятна или данных не хватает (неизвестен id приложения
+    или структура экрана), задай ровно один короткий вопрос и предложи,
+    как эти данные получить: в SandFly есть вывод дерева экрана, его можно
+    скопировать в чат.
+
+================================================================
+РАЗДЕЛ 2. СПРАВОЧНИК API SANDFLY (версия API 6, Lua 5.4)
+================================================================
+
+# SandFly scripts — compact API reference (API version 6, Lua 5.4)
+
+Official full text: `docs/01-official-writing-sandfly-scripts.md`.
+
+A script is one file `main.lua` (up to 1 MB). It must start with a manifest table
+that holds only plain values (text, numbers, true/false, tables):
+
+```lua
+local manifest = {
+  id = 'author.script-name',        -- required, lowercase, dots/dashes; same id replaces installed script
+  name = 'Human name',              -- required
+  version = '1.0',                  -- raise it with every change
+  author = 'Author',                -- required
+  minApiVersion = 6,                -- required
+  testedApiVersion = 6,             -- required
+  description = 'What it does.',    -- shown before install
+  apps = { 'com.example.app' },     -- omit to run in every app
+  permissions = { 'screen', 'actions', 'speech' },
+  commands = {
+    { id = 'do_it', title = 'Do it', menu = true },
+  },
+  settings = {
+    { key = 'enabled', type = 'switch', title = 'Enabled', default = true },
+  },
+}
+```
+
+No `io`, `debug`, `package`, no file access. Only `sf`, `string`, `table`, `math`,
+`utf8`, `coroutine`, `os.time/clock/date/difftime`, `json`, `require`.
+
+## Permissions
+
+- `screen` — read the screen, hooks with items, `sf.screen`, `sf.app()`, `sf.speech.last()`.
+- `actions` — click, scroll, type, move focus, `sf.touch`, `sf.keys`.
+- `speech` — `sf.speak`, `sf.message`, speech-changing hooks, rules.
+- `input` — command `gesture`/`keys`/`menu`/`control`, `navigation`, `sf.bind`, `sf.commands.run`, `sf.keys.passAll`.
+- `passwords`, `network` (`sf.fetch`, `sf.translate`), `clipboard`, `system`, `notifications`, `events`, `dialogs`, `java`.
+
+## Where a script runs
+
+`apps` = package name, list, or records `{ package=..., activity='.Activity', window='Title' }`.
+Script loads when the app comes to front and unloads when it leaves (variables lost;
+use `sf.storage`). No `apps` = runs in every app while on.
+
+## Queries
+
+`sf.screen.find(query)`, `sf.screen.findAll(query, limit)`, `item:find(query)`,
+`sf.screen.waitFor(query, timeoutMs, intervalMs)`.
+
+Query is an id string, or a record of: `id`, `text`, `textContains`,
+`contentDescription`, `className` (end of class name), `role`, `clickable`,
+`parentId`, `inside` (query on an ancestor), `has` (query on a descendant),
+`hasDepth`, `focusable`, `focused`, `selected`, `enabled`, `editable`,
+`scrollable`, `visible`, `heading`, `checked`, `checkable`, `password`,
+`hint`, `stateDescription`, `contains`, `matches` (regex), `field`, `kind`.
+
+```lua
+local list = sf.screen.waitFor({ id = 'servers_recycler_view' }, 8000, 300)
+local row  = sf.screen.find({ className = 'Button', inside = { id = 'toolbar' } })
+local any  = sf.screen.find({ textContains = 'НОВЫЙ СЕРВЕР' })
+```
+
+## Items
+
+Fields: `text`, `contentDescription`, `hint`, `stateDescription`, `id`,
+`className`, `role`, `packageName`, `bounds{left,top,right,bottom}`, `visible`,
+`clickable`, `longClickable`, `focusable`, `focused`, `selected`, `enabled`,
+`editable`, `scrollable`, `heading`, `checked`, `childCount`, `actions`,
+`collection`, `collectionItem{row,column,...}`, `range{min,max,current}`, `uniqueId`.
+
+Methods: `item:parent()`, `item:children()`, `item:child(i)`, `item:find(q)`,
+`item:findAll(q, limit)`, `item:refresh()`, `item:click()`, `item:longClick()`,
+`item:scrollForward()`, `item:scrollBackward()`, `item:focus()`, `item:setText(t)`,
+`item:perform('expand'|'collapse'|'dismiss'|'showOnScreen'|... , args)`,
+`item:tap()`, `item:doubleTap()`, `item:longPress(ms)`, `item:setSelection(a,b)`.
+An item is a snapshot: call `item:refresh()` after the screen changes.
+
+## Hooks
+
+```lua
+sf.onAppEnter(function(info) end)   -- info = { package, activity, window }
+sf.onAppLeave(function(info) end)
+sf.onWindowChange(function(info) end)
+sf.onContentChange(function(info) end)
+sf.onFocus(function(item, text) end)
+sf.onSpeech(function(text) end)
+sf.onCommand('command_id', function(event) end)  -- event.node, event.via, event.direction
+```
+
+Speech hooks (`onFocus`, `onSpeech`, `onNotification`, `onAnnouncement`) return
+text, `{speak=text}`, `{before=,after=}`, `false` or `{silent=true}`.
+They must answer in 30 ms and cannot wait. Elsewhere a call that waits is fine;
+in a non-waiting hook use `sf.run(function() ... end)`.
+
+## Speech, sound
+
+`sf.speak(text, {interrupt, rate, pitch, language, wait})`, `sf.message(text)`,
+`sf.speech.stop()`, `sf.speech.isSpeaking()`, `sf.speech.last()`,
+`sf.playSound('focus'|'click'|'actionable'|'end'|'beep'|...)`,
+`sf.playTone(hz, ms)`, `sf.vibrate(ms_or_list)`.
+
+## Screen, app
+
+`sf.screen.focused()`, `sf.screen.root()`, `sf.screen.find`, `findAll`,
+`sf.screen.inputFocused()`, `sf.screen.at(x,y)`, `sf.screen.windows()`,
+`sf.screen.waitFor`, `sf.screen.click(q)`, `sf.app()` → `{package,label,activity,window,meta}`.
+
+## Touch, keys
+
+`sf.touch.tap(x,y)`, `doubleTap`, `longPress(x,y,ms)`, `swipe(x1,y1,x2,y2,ms)`;
+`sf.keys.type(text)`, `sf.keys.press('enter tab down ...')` (needs Shizuku).
+
+## Storage, settings, timers
+
+`sf.storage.get/set/remove/keys/clear`; `sf.settings.get/all/set`;
+`sf.setTimeout(fn, ms)`, `sf.setInterval(fn, ms)`, `sf.clearTimer(id)`,
+`sf.sleep(ms)`, `sf.run(fn, ...)`, `sf.clock()`.
+
+## Dialogs
+
+`sf.ui.alert(msg, {title})`, `sf.ui.confirm(msg)` → boolean,
+`sf.ui.prompt(title)`, `sf.ui.choose(title, options)`,
+`sf.ui.dialog({title, items, onClose})`, `sf.ui.window(...)`, `sf.ui.text(title, text)`.
+Need `dialogs`.
+
+## System, clipboard, network, device
+
+`sf.clipboard.get/set`; `sf.system.back/home/recents/notifications/openApp/openUrl/share/openSettings`,
+`sf.system.startActivity(intent)`; `sf.fetch(url, {method, headers, body, timeout})`
+→ `{status, ok, body, json()}`; `sf.translate(text, {from,to})`;
+`sf.device.info/battery/network/volume/setVolume/ringerMode/get/set`;
+`sf.commands.run('NEXT')`, `sf.commands.list()`.
+
+## Rules (no code, cheapest way to fix an app)
+
+```lua
+rules = {
+  { id = 'send_button', label = 'Send' },
+  { match = { className = 'ImageView', parentId = 'toolbar' }, hide = true },
+  { id = 'row', group = true, hint = 'Double-tap to open' },
+}
+```
+
+Rule fields: `id`, `match`, `window`, `activity`, `label`, `speak`, `hide`,
+`silence`, `role`, `state`, `hint`, `heading`, `group`, `readBefore`, `readAfter`,
+`actions`, `read`, `buttonActions`, `skipButtons`, `activate`, `liftToActivate`,
+`longPressAfter`, `touchToActivate`.
+Rules from code: `sf.rules.add(rule)` → number, `sf.rules.remove(n)`, `sf.rules.clear()`.
+
+## Commands and navigation
+
+```lua
+commands = {
+  { id = 'unread', title = 'Next unread', gesture = 'swipeUpThenRight', keys = 'sf+u' },
+  { id = 'summary', title = 'Read summary', menu = true },
+  { id = 'messages', title = 'Messages', control = true },
+}
+```
+
+`sf.onCommand(id, fn)`; `event.via` is `'gesture'`, `'keys'`, `'menu'`,
+`'control'` or `'command'`; return `false` to let the app have the gesture/keys.
+`sf.bind(id, {gesture=...})`, `sf.unbind(id, ...)`.
+
+## Limits
+
+2 s per call, 32 MB memory; 500 items kept; screen search up to 3000 items,
+returns up to 200; 500 rules, 50 commands; script turned off after 5 errors in a minute.
+Text for speech is cut at 20 000 characters.
+
+## Saving and installing
+
+- Save as `.lua` (UTF-8). In SandFly: **Apps → Scripts → Import script**.
+- If the manifest's `id` matches an installed script, importing updates it and
+  keeps its settings and stored data.
+- Errors are in the script's **Log** on its page.
+================================================================
+РАЗДЕЛ 3. СКЕЛЕТ СКРИПТА (отсюда начинается любой новый скрипт)
+================================================================
+
+Это рабочая заготовка: поменяй id, название, приложение и поиск элемента.
+Всё остальное — хуки, защита от повторов, настройка, команда — уже на месте.
+
+------------------------------------------------------------
+-- Slonobass <Приложение> — скрипт для SandFly.
+--
+-- Что делает: при открытии приложения фокус встаёт на нужный элемент,
+-- чтобы пользователю не искать его вручную.
+--
+-- Как ищет: основной путь — по id списка. Если сборка не отдаёт id,
+-- список ищется как единственный прокручиваемый контейнер на экране.
+-- Внутри списка первая строка — первый фокусируемый элемент с текстом.
+--
+-- В настройках — переключатель «Фокус при открытии». В меню команд —
+-- «Перейти к …»: тот же переход вручную, если фокус уехал.
+
+local manifest = {
+  id = 'wam.primer-app',
+  name = 'Slonobass Пример',
+  version = '1.0',
+  author = 'Алёшка',
+  minApiVersion = 6,
+  testedApiVersion = 6,
+  description = 'При открытии приложения фокус встаёт на первую строку списка. В настройках — переключатель, в меню команд — ручной переход.',
+  apps = { 'com.example.app' },
+  permissions = { 'screen', 'actions', 'input' },
+  commands = {
+    { id = 'focus_target', title = 'Перейти к первой строке', menu = true },
+  },
+  settings = {
+    {
+      key = 'autoFocus',
+      type = 'switch',
+      title = 'Фокус при открытии',
+      summary = 'При входе фокус встаёт на первую строку списка',
+      default = true,
+    },
+  },
+}
+
+local LIST_ID = 'recycler_view'
+
+-- Список. Основной путь — по id. Запасной — прокручиваемый контейнер,
+-- но только если он один на экране: два списка означают, что экран
+-- не тот, и лучше не трогать фокус, чем поставить его не туда.
+local function find_list(timeout)
+  local list = sf.screen.waitFor({ id = LIST_ID }, timeout or 3000, 300)
+  if list then
+    return list
+  end
+  local all = sf.screen.findAll({ scrollable = true }, 5) or {}
+  if #all == 1 then
+    return all[1]
+  end
+end
+
+-- Первая строка списка: фокусируемый элемент с непустым текстом.
+-- Пустые и служебные строки (заголовки разделов) пропускаем.
+local function first_row(list)
+  local rows = list:findAll({ focusable = true }, 60) or {}
+  for _, row in ipairs(rows) do
+    local text = row.text or row.contentDescription or ''
+    if text ~= '' then
+      return row
+    end
+  end
+end
+
+-- Стоит ли фокус внутри списка: если да, не отбираем его у пользователя.
+local function focus_in_list(list)
+  local focused = sf.screen.focused()
+  if not focused then
+    return false
+  end
+  local node = focused
+  for _ = 1, 12 do
+    if not node then
+      return false
+    end
+    if node.uniqueId == list.uniqueId then
+      return true
+    end
+    node = node:parent()
+  end
+  return false
+end
+
+-- Основное действие. Всегда вызывается внутри sf.run: функция ждёт экран,
+-- а ждать в хуках нельзя.
+local function place_focus(force)
+  if not force and sf.settings.get('autoFocus') == false then
+    return
+  end
+  local list = find_list(force and 3000 or 1500)
+  if not list then
+    return
+  end
+  if not force and focus_in_list(list) then
+    return
+  end
+  local row = first_row(list)
+  if row then
+    row:focus()
+  else
+    list:focus()
+  end
+end
+
+-- Защита от повторов: onWindowChange может срабатывать несколько раз
+-- подряд, пока экран дорисовывается. Пропускаем повторные попытки,
+-- пока предыдущая не закончилась, и не чаще одного раза за 600 мс.
+local last_run = 0
+local running = false
+
+local function maybe_focus(force)
+  if running then
+    return
+  end
+  local now = sf.clock()
+  if not force and now - last_run < 600 then
+    return
+  end
+  last_run = now
+  running = true
+  sf.run(function()
+    local ok, err = pcall(place_focus, force)
+    running = false
+    if not ok then
+      print('Пример: ошибка фокуса: ' .. tostring(err))
+    end
+  end)
+end
+
+sf.onAppEnter(function(info)
+  sf.setTimeout(function()
+    maybe_focus(false)
+  end, 400)
+end)
+
+sf.onWindowChange(function(info)
+  maybe_focus(false)
+end)
+
+sf.onCommand('focus_target', function()
+  maybe_focus(true)
+end)
+
+print('Пример: фокус на первую строку, версия 1.0 загружена')
+------------------------------------------------------------
+
+================================================================
+РАЗДЕЛ 4. ПРИМЕР РАБОЧЕГО СКРИПТА (TeamTalk)
+================================================================
+
+Это настоящий скрипт, который работает у пользователя. По нему видно стиль:
+подробный manifest, комментарии о том, почему выбран такой поиск, запасные
+пути, защита от повторов, настройка и команда.
+
+-- Slonobass TeamTalk — скрипт для SandFly.
+--
+-- Версия 1.0: при открытии TeamTalk фокус встаёт на первый сервер в списке
+-- серверов. Дальше можно сразу идти по серверам свайпом, не отыскивая список
+-- вручную. Внутри сервера, в поиске и в диалогах скрипт фокус не трогает.
+--
+-- Список серверов узнаётся по id servers_recycler_view: он один на всём
+-- экране ServerListActivity. Строка сервера — фокусируемый объект внутри
+-- списка, у которого есть имя сервера (server_name). Если сборка не отдаст
+-- id, список ищется рядом с кнопкой «НОВЫЙ СЕРВЕР», чтобы не спутать его
+-- с чужим списком — например, со списком каналов внутри сервера.
+--
+-- В настройках скрипта переключатель «Фокус на первый сервер». В меню команд —
+-- «Перейти к первому серверу»: тот же переход вручную, если фокус уехал.
+
+local manifest = {
+  id = 'wam.teamtalk-first-server',
+  name = 'Slonobass TeamTalk',
+  version = '1.0',
+  author = 'Алёшка',
+  minApiVersion = 2,
+  testedApiVersion = 5,
+  description = 'При открытии TeamTalk фокус встаёт на первый сервер в списке серверов: дальше можно сразу идти по серверам свайпом. Внутри сервера, в поиске и в диалогах фокус не трогает. В настройках — переключатель «Фокус на первый сервер», в меню команд — «Перейти к первому серверу».',
+  apps = { 'dk.bearware.gui' },
+  permissions = { 'screen', 'speech', 'input', 'actions' },
+  commands = {
+    { id = 'focus_first_server', title = 'Перейти к первому серверу', menu = true },
+  },
+  settings = {
+    {
+      key = 'focusFirstServer',
+      type = 'switch',
+      title = 'Фокус на первый сервер',
+      summary = 'При открытии приложения фокус встаёт на первый сервер в списке',
+      default = true,
+    },
+  },
+}
+
+local LIST_ID = 'servers_recycler_view'
+local NAME_ID = 'server_name'
+
+-- ── Экран списка серверов ──
+
+-- Площадь элемента по границам: нужна только запасному поиску списка.
+local function area(item)
+  local b = item and item.bounds
+  if not b then
+    return 0
+  end
+  local w = b.right - b.left
+  local h = b.bottom - b.top
+  if w <= 0 or h <= 0 then
+    return 0
+  end
+  return w * h
+end
+
+-- Список серверов. Основной путь — по id. Если query с id в этой сборке не
+-- работает, список ищем только на экране с кнопкой «НОВЫЙ СЕРВЕР»: одного
+-- прокручиваемого списка на экране мало, внутри сервера он тоже есть.
+local function findServerList(timeout)
+  local ok, list = pcall(function()
+    return sf.screen.waitFor({ id = LIST_ID }, timeout or 8000, 300)
+  end)
+  if ok and list then
+    return list
+  end
+  local marker = sf.screen.find({ textContains = 'НОВЫЙ СЕРВЕР' })
+    or sf.screen.find({ textContains = 'NEW SERVER' })
+  if not marker then
+    return nil
+  end
+  local best = nil
+  local bestArea = 0
+  local lists = sf.screen.findAll({ scrollable = true }, 20)
+  if lists then
+    for _, item in ipairs(lists) do
+      if item.visible then
+        local a = area(item)
+        if a > bestArea then
+          best = item
+          bestArea = a
+        end
+      end
+    end
+  end
+  return best
+end
+
+-- Элемент внутри этого списка: поднимаемся по родителям.
+local function isInside(parent, item)
+  local cur = item
+  for _ = 1, 12 do
+    if not cur then
+      return false
+    end
+    cur = cur:parent()
+    if not cur then
+      return false
+    end
+    if cur == parent then
+      return true
+    end
+  end
+  return false
+end
+
+-- Строка сервера содержит имя сервера. Проверка по id — самая надёжная:
+-- у строки в дереве есть server_name и server_summary.
+local function hasServerName(row)
+  local ok, name = pcall(function()
+    return row:find({ id = NAME_ID })
+  end)
+  return ok and name ~= nil
+end
+
+-- Первый сервер списка — первая живая строка. Если имя сервера найти не
+-- удалось, берём первую строку-элемент коллекции, затем первую похожую на
+-- строку по типу, и в последнюю очередь — любой фокусируемый объект списка.
+local function firstServerRow(list)
+  local rows = list:findAll({ focusable = true }, 60)
+  if not rows then
+    return nil
+  end
+  local byShape = nil
+  local any = nil
+  for _, row in ipairs(rows) do
+    if row.visible and row ~= list then
+      if hasServerName(row) then
+        return row
+      end
+      if row.collectionItem and not byShape then
+        byShape = row
+      end
+      if row.className == 'RelativeLayout' and not byShape then
+        byShape = row
+      end
+      if not any then
+        any = row
+      end
+    end
+  end
+  return byShape or any
+end
+
+-- Фокус внутри этого списка. Сам контейнер считается тоже: SandFly отдаёт
+-- фокус контейнеру, когда строки его не берут.
+local function focusedInList(list, cur)
+  if not cur then
+    return false
+  end
+  if cur == list then
+    return true
+  end
+  return isInside(list, cur)
+end
+
+-- Фокус стоит на этой строке или на её части.
+local function onRow(row, cur)
+  if not row or not cur then
+    return false
+  end
+  if cur == row then
+    return true
+  end
+  return isInside(row, cur)
+end
+
+-- Одного перевода мало: приложение дорисовывает список уже после нас и может
+-- увести фокус. Поэтому после каждой попытки смотрим, где фокус оказался,
+-- и, если он не на первом сервере, переводим снова.
+local FOCUS_TRIES = 3
+local FOCUS_STEP = 350
+
+-- force = true — вход в приложение: ставим фокус на первый сервер всегда,
+-- даже если он остался на другой строке с прошлого раза.
+-- Без force фокус переводим только тогда, когда он нигде или на самом
+-- списке: человек уже стоит на строке, в поиске или в диалоге — не мешаем.
+local function placeFocus(list, force)
+  local cur = sf.screen.focused()
+  if not force then
+    if focusedInList(list, cur) then
+      return true
+    end
+    if cur ~= nil and cur ~= list then
+      return false
+    end
+  elseif onRow(firstServerRow(list), cur) then
+    return true
+  end
+  for _ = 1, FOCUS_TRIES do
+    local row = firstServerRow(list)
+    if row then
+      pcall(function()
+        row:focus()
+      end)
+    end
+    sf.sleep(FOCUS_STEP)
+    cur = sf.screen.focused()
+    if onRow(row, cur) then
+      return true
+    end
+    -- Экран перерисовался: список берём заново, старый узел мог устареть.
+    local again = findServerList(500)
+    if not again then
+      return false
+    end
+    list = again
+  end
+  return false
+end
+
+-- ── Автоматический переход ──
+
+-- Поколение окна: при смене окна и при входе в приложение попытка делается
+-- заново, а в пределах одного экрана — один раз, чтобы не дёргать фокус.
+local generation = 0
+local handledGeneration = -1
+local attemptRunning = false
+
+local function maybeFocus(force)
+  if sf.settings.get('focusFirstServer') == false then
+    return
+  end
+  if handledGeneration == generation then
+    return
+  end
+  local myGeneration = generation
+  sf.run(function()
+    if attemptRunning then
+      return
+    end
+    attemptRunning = true
+    local list = findServerList(force and 12000 or 5000)
+    if list then
+      local cur = sf.screen.focused()
+      local ok
+      if force or cur == nil or cur == list then
+        ok = placeFocus(list, force)
+      else
+        -- Фокус уже на строке списка, в поиске или в диалоге — не трогаем.
+        ok = true
+      end
+      if ok and myGeneration == generation then
+        handledGeneration = myGeneration
+      end
+    end
+    attemptRunning = false
+  end)
+end
+
+sf.onAppEnter(function()
+  generation = generation + 1
+  maybeFocus(true)
+end)
+
+sf.onWindowChange(function()
+  generation = generation + 1
+  local cur = sf.screen.focused()
+  local kind = cur and cur.className
+  -- Человек печатает в поиске — окно сменилось из-за клавиатуры или
+  -- подсказок, фокус не трогаем.
+  if kind == 'EditText' or kind == 'AutoCompleteTextView' then
+    handledGeneration = generation
+    return
+  end
+  maybeFocus(false)
+end)
+
+-- Список серверов при входе может дорисоваться позже окна. Пока переход ещё
+-- не сделан, изменение содержимого — повод попробовать снова; после успеха
+-- скрипт молчит до следующей смены окна.
+sf.onContentChange(function()
+  if handledGeneration ~= generation then
+    maybeFocus(false)
+  end
+end)
+
+-- ── Ручной переход ──
+
+-- SandFly → Команды → «Перейти к первому серверу».
+sf.onCommand('focus_first_server', function()
+  local list = findServerList(3000)
+  if not list then
+    sf.speak('Список серверов не найден')
+    return
+  end
+  if not placeFocus(list, true) then
+    sf.speak('Первый сервер не найден')
+  end
+end)
+
+print('TeamTalk: фокус на первый сервер, версия 1.0 загружена')
+
+================================================================
+РАЗДЕЛ 5. ЧЕК-ЛИСТ ПЕРЕД УСТАНОВКОЙ
+================================================================
+
+1. Файл начинается с local manifest и это обычная таблица: только текст,
+   числа, true/false, вложенные таблицы. Никаких вызовов функций внутри.
+2. В manifest есть id, name, version, author, minApiVersion, testedApiVersion.
+3. Все функции, которые использует скрипт, есть в справочнике.
+4. Каждый важный поиск элемента имеет запасной путь.
+5. Всё, что ждёт дольше одного кадра, запущено через sf.run или sf.setTimeout.
+6. Есть переключатель в settings, если скрипт что-то меняет по своей воле.
+7. Скрипт можно выключить, не удаляя: переключатель в настройках.
+
+Установка: сохранить файл с расширением .lua в кодировке UTF-8, затем в
+SandFly открыть Приложения, Скрипты, Импорт скрипта и выбрать файл.
+Ошибки видны в журнале скрипта на его странице.
