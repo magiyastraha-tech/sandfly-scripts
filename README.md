@@ -147,6 +147,21 @@ id `wam.nekogram-actions`.
 Переключатель «Фокус на первый чат» в настройках скрипта отключает переход, а
 команда «Перейти к первому чату» делает его вручную.
 
+**Slonobass TeamTalk** — для TeamTalk (dk.bearware.gui),
+id `wam.teamtalk-first-server`.
+
+При открытии TeamTalk фокус встаёт на первый сервер в списке серверов —
+дальше можно сразу идти по серверам свайпом, не разыскивая список. Список
+узнаётся по id `servers_recycler_view`, строка сервера — по имени
+`server_name` внутри неё.
+
+Внутри сервера, в поиске и в диалогах скрипт фокус не трогает: при смене
+окна он переводит фокус, только если тот нигде или на самом списке. Если
+приложение, дорисовывая экран, уводит фокус, скрипт проверяет, где он
+оказался, и переводит его на первый сервер заново — до трёх попыток.
+Переключатель «Фокус на первый сервер» в настройках скрипта отключает
+переход, а команда «Перейти к первому серверу» делает его вручную.
+
 **Slonobass Переводчик** — переводчик текста в любом приложении,
 id `wam.translator`.
 
@@ -409,7 +424,7 @@ SandFly версии не ниже 2. wam.google-messages-actions провере
 wam.tele2-summary — на API 3, ymusic.video_rows и wam.translator — на API 4,
 wam.nekogram-actions, samsung-email-delete-action,
 wam.google-play-updates-focus, filemanager-select, cyberportal-vpn,
-v2raytun-vpn и wam.max-actions — на API 5.
+v2raytun-vpn, wam.max-actions и wam.teamtalk-first-server — на API 5.
 wam.samsung-call-log-actions написан под API 2: без него остаётся только
 программное нажатие, а часть кнопок его не принимает.
 
