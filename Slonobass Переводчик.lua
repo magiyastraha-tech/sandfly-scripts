@@ -1,7 +1,7 @@
 local manifest = {
   id = 'wam.translator',
   name = 'Slonobass Переводчик',
-  version = '2.4',
+  version = '2.5',
   author = 'Slonobass',
   minApiVersion = 4,
   testedApiVersion = 4,
@@ -190,6 +190,38 @@ local function overlayOnTop()
   return list[1] ~= nil and list[1].type == 'accessibilityOverlay'
 end
 
+-- Пока на экране окно SandFly (например, его меню, из которого запустили команду),
+-- скрипт не имеет права показывать свои окна: SandFly отвечает ошибкой
+-- «Scripts can't use dialogs on SandFly's own screens». Меню закрывается не сразу,
+-- поэтому ждём и пробуем ещё раз.
+local function withFreeScreen(build)
+  local lastErr
+  for _ = 1, 20 do
+    local ok, result = pcall(build)
+    if ok then return result end
+    lastErr = result
+    if not tostring(result):find('own screens') then error(result, 0) end
+    sf.sleep(150)
+  end
+  error(lastErr, 0)
+end
+
+-- Сейчас впереди экран самого SandFly (например, его меню)? Пока он впереди,
+-- скрипту запрещены и чтение экрана, и диалоги — любая такая попытка даёт ошибку.
+local function sandflyInFront()
+  return not pcall(sf.screen.focused)
+end
+
+-- Ждём, пока SandFly уступит экран приложению: его меню закрывается не мгновенно.
+local function waitForApp(timeout)
+  local waited = 0
+  while sandflyInFront() and waited < (timeout or 3000) do
+    sf.sleep(100)
+    waited = waited + 100
+  end
+  return not sandflyInFront()
+end
+
 local function trim(s)
   return (s:gsub('^%s+', ''):gsub('%s+$', ''))
 end
@@ -363,8 +395,9 @@ end
 -- сразу переводит на него, а в меню действий у каждой строки — «Добавить в избранное».
 local function openAllLanguages(onPick)
   local show = overlayOnTop() and sf.ui.dialog or sf.ui.window
-  show({
-    title = 'Все языки',
+  withFreeScreen(function()
+    return show({
+      title = 'Все языки',
     items = {
       {
         type = 'edit',
@@ -394,7 +427,8 @@ local function openAllLanguages(onPick)
         end,
       },
     },
-  })
+    })
+  end)
 end
 
 -- Главное окно: избранные языки, следом кнопка «Все языки».
@@ -408,8 +442,9 @@ local function openFavorites(onPick)
   end
 
   local show = overlayOnTop() and sf.ui.dialog or sf.ui.window
-  favoritesWindow = show({
-    title = 'Куда перевести?',
+  favoritesWindow = withFreeScreen(function()
+    return show({
+      title = 'Куда перевести?',
     items = {
       {
         type = 'items',
@@ -454,7 +489,8 @@ local function openFavorites(onPick)
     onClose = function()
       favoritesWindow = nil
     end,
-  })
+    })
+  end)
 end
 
 -- Первое редактируемое поле внутри окна.
@@ -543,11 +579,15 @@ local function getText()
 
   options[#options + 1] = { value = 'prompt', label = 'Ввести текст вручную' }
 
-  local choice = sf.ui.choose('В фокусе нет текста. Откуда взять текст?', options)
+  local choice = withFreeScreen(function()
+    return sf.ui.choose('В фокусе нет текста. Откуда взять текст?', options)
+  end)
   if choice == 'spoken' then return spoken end
   if choice == 'clipboard' then return clip end
   if choice == 'prompt' then
-    local typed = sf.ui.prompt('Текст для перевода')
+    local typed = withFreeScreen(function()
+      return sf.ui.prompt('Текст для перевода')
+    end)
     if typed then return trim(typed) end
   end
   return nil
@@ -614,6 +654,10 @@ local function replaceInField(original, translated, clipboardReady)
 end
 
 local function runTranslate()
+  -- Команду запускают из меню SandFly, а меню закрывается не сразу. Пока оно на экране,
+  -- скрипт не видит ни поля ввода, ни права открыть своё окно. Дожидаемся приложения.
+  waitForApp(3000)
+
   local text, field = getText()
   if not text or text == '' then return end
 
@@ -624,13 +668,15 @@ local function runTranslate()
     sf.speak('Перевод: ' .. name)
     local result, err = translate(text, code)
     if not result then
-      sf.ui.alert(
-        'Перевести не получилось.\n\n' .. tostring(err)
-          .. '\n\nЕсли в настройках SandFly → Перевод выбрано «На устройстве», '
-          .. 'этот язык может быть не скачан или не поддержан. '
-          .. 'Google Cloud Translation понимает все языки из списка.',
-        { title = 'Ошибка перевода' }
-      )
+      withFreeScreen(function()
+        return sf.ui.alert(
+          'Перевести не получилось.\n\n' .. tostring(err)
+            .. '\n\nЕсли в настройках SandFly → Перевод выбрано «На устройстве», '
+            .. 'этот язык может быть не скачан или не поддержан. '
+            .. 'Google Cloud Translation понимает все языки из списка.',
+          { title = 'Ошибка перевода' }
+        )
+      end)
       return
     end
 
@@ -652,7 +698,9 @@ local function runTranslate()
       sf.speak('В поле не вставлено: ' .. why)
     end
 
-    sf.ui.text('Перевод: ' .. name, result)
+    withFreeScreen(function()
+      return sf.ui.text('Перевод: ' .. name, result)
+    end)
   end)
 end
 
@@ -660,10 +708,19 @@ end
 -- ни объяснения. Теперь причина называется вслух.
 sf.onCommand('translate', function()
   local ok, err = pcall(runTranslate)
-  if not ok then
-    pcall(sf.speak, 'Скрипт остановился с ошибкой: ' .. tostring(err))
-    pcall(sf.ui.alert, 'Скрипт остановился с ошибкой:\n\n' .. tostring(err), { title = 'Ошибка перевода' })
+  if ok then return end
+
+  local message = tostring(err)
+  -- Экран SandFly не отдаёт управление — обычно потому, что его меню ещё открыто.
+  -- Об этом лучше сказать человеческими словами, чем показывать английскую ошибку.
+  if message:find('own screens') then
+    pcall(sf.speak,
+      'SandFly ещё на своём экране. Закрой его меню и запусти «Перевести» ещё раз.')
+    return
   end
+
+  pcall(sf.speak, 'Скрипт остановился с ошибкой: ' .. message)
+  pcall(sf.ui.alert, 'Скрипт остановился с ошибкой:\n\n' .. message, { title = 'Ошибка перевода' })
 end)
 
 -- Короткое описание элемента для диагностики.
@@ -680,6 +737,14 @@ end
 sf.onCommand('check', function()
   local ok, err = pcall(function()
     local lines = {}
+
+    -- Команда тоже запускается из меню SandFly: пока оно не закрылось, скрипт
+    -- не видит ни окон, ни поля, ни права открыть диалог.
+    if waitForApp(3000) then
+      lines[#lines + 1] = 'Экран SandFly: свободен'
+    else
+      lines[#lines + 1] = 'Экран SandFly: занят — его меню всё ещё открыто'
+    end
 
     local okApp, app = pcall(sf.app)
     if okApp and type(app) == 'table' then
@@ -708,9 +773,12 @@ sf.onCommand('check', function()
 
     -- Последняя проверка: показываются ли в этом приложении окна вообще.
     sf.speak('Сейчас откроется проверочное окно. Если его не видно — просто уйди в другое приложение.')
-    pcall(sf.ui.alert,
+    local okAlert, alertErr = pcall(sf.ui.alert,
       'Проверочное окно открылось. Значит, окна здесь показываются.',
       { title = 'Проверка' })
+    if not okAlert then
+      sf.speak('Проверочное окно не открылось: ' .. tostring(alertErr))
+    end
   end)
   if not ok then pcall(sf.speak, 'Диагностика не получилась: ' .. tostring(err)) end
 end)
