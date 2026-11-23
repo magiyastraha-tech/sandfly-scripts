@@ -1,7 +1,7 @@
 local manifest = {
   id = 'wam.translator',
   name = 'Slonobass Переводчик',
-  version = '2.2',
+  version = '2.3',
   author = 'Slonobass',
   minApiVersion = 4,
   testedApiVersion = 4,
@@ -437,10 +437,29 @@ local function openFavorites(onPick)
   })
 end
 
+-- Поле ввода: сначала то, куда печатает клавиатура, затем элемент в фокусе SandFly,
+-- затем любой редактируемый элемент с фокусом. В части диалогов (например, «Название»
+-- в TalkBack) inputFocused() не отвечает, хотя поле на экране есть и в нём можно печатать.
+local function editableField()
+  local ok, item = pcall(sf.screen.inputFocused)
+  if ok and item and item.editable then return item end
+  ok, item = pcall(sf.screen.focused)
+  if ok and item and item.editable then return item end
+  ok, item = pcall(sf.screen.find, { editable = true, focused = true })
+  if ok and item and item.editable then return item end
+end
+
+-- Длина в единицах Android (UTF-16): так считают позиции выделения и курсора.
+local function utf16len(s)
+  local n = 0
+  for _, cp in utf8.codes(s) do n = n + (cp > 0xFFFF and 2 or 1) end
+  return n
+end
+
 -- Поле ввода, в которое можно вставить перевод. Возвращает элемент и его текст.
 local function inputField()
-  local item = sf.screen.inputFocused()
-  if item and item.editable and type(item.text) == 'string' then
+  local item = editableField()
+  if item and type(item.text) == 'string' then
     local value = trim(item.text)
     if value ~= '' then return item, value end
   end
@@ -499,18 +518,64 @@ local function getText()
   return nil
 end
 
+-- Ждём, пока поле действительно покажет нужный текст: приложение применяет его не сразу.
+local function fieldShows(wanted)
+  for _ = 1, 5 do
+    local item = editableField()
+    if item and type(item.text) == 'string' and trim(item.text) == wanted then return true end
+    sf.sleep(100)
+  end
+  return false
+end
+
 -- Вставляет перевод в поле ввода вместо исходного текста. Поле перепроверяем заново:
 -- пока шёл выбор языка и перевод, фокус мог уехать. Если текст в поле уже не тот,
 -- ничего не меняем — иначе затрём то, что человек успел набрать.
-local function replaceInField(original, translated)
-  local target = sf.screen.inputFocused()
-  if not target or not target.editable then return false, 'поле ввода больше не активно' end
-  local current = type(target.text) == 'string' and trim(target.text) or ''
-  if current ~= original then return false, 'текст в поле изменился' end
-  local ok, done = pcall(target.setText, target, translated)
-  if not ok then return false, tostring(done) end
-  if done == false then return false, 'поле не принимает текст' end
-  return true
+--
+-- Не всякое поле принимает текст напрямую: у части диалогов (например, «Название»
+-- в TalkBack) нет действия «установить текст». Поэтому идём по шагам, и после каждого
+-- проверяем, что поле действительно показывает перевод:
+-- 1) установить текст; 2) выделить всё и напечатать через клавиатуру;
+-- 3) выделить всё и вставить из буфера обмена (если перевод туда уже положен).
+local function replaceInField(original, translated, clipboardReady)
+  local target = editableField()
+    or sf.screen.waitFor({ editable = true, focused = true }, 1000, 200)
+  if not target then return false, 'поле ввода больше не активно' end
+  local current = type(target.text) == 'string' and target.text or ''
+  if trim(current) ~= trim(original) then return false, 'текст в поле изменился' end
+
+  local wanted = trim(translated)
+  local len = utf16len(current)
+
+  -- 1. Прямая установка текста: обычным полям этого достаточно.
+  pcall(target.setText, target, translated)
+  pcall(target.perform, target, 'setText', { text = translated })
+  if fieldShows(wanted) then return true end
+
+  -- 2. Выделить всё и напечатать через клавиатуру — так текст доходит и до полей,
+  -- которые не принимают «установить текст», но принимают ввод с клавиатуры.
+  local fresh = editableField() or target
+  pcall(fresh.setSelection, fresh, 0, len)
+  pcall(fresh.perform, fresh, 'setSelection', { start = 0, ['end'] = len })
+  fresh = editableField() or target
+  local allSelected = fresh.selectionStart == 0 and (fresh.selectionEnd or 0) >= len
+  if allSelected then
+    pcall(sf.keys.type, translated)
+    if fieldShows(wanted) then return true end
+  end
+
+  -- 3. Выделить всё и вставить из буфера — только когда там действительно перевод.
+  if clipboardReady then
+    pcall(fresh.setSelection, fresh, 0, len)
+    pcall(fresh.perform, fresh, 'setSelection', { start = 0, ['end'] = len })
+    fresh = editableField() or target
+    if fresh.selectionStart == 0 and (fresh.selectionEnd or 0) >= len then
+      pcall(fresh.perform, fresh, 'paste')
+      if fieldShows(wanted) then return true end
+    end
+  end
+
+  return false, 'поле не принимает текст'
 end
 
 sf.onCommand('translate', function()
@@ -543,15 +608,15 @@ sf.onCommand('translate', function()
 
     -- Поле ввода: по умолчанию возвращаем перевод туда же, где был исходный текст.
     if field and sf.settings.get('replace') ~= false then
-      local replaced, why = replaceInField(text, result)
+      local replaced, why = replaceInField(text, result, copied)
       if replaced then
-        sf.speak('Перевод вставлен: ' .. name .. (copied and ' (скопировано)' or ''))
+        sf.speak('Перевод вставлен: ' .. name)
         return
       end
       -- Не вышло — показываем перевод в окне и коротко говорим, почему поле не тронуто.
       sf.speak('В поле не вставлено: ' .. why)
     end
 
-    sf.ui.text('Перевод: ' .. name .. (copied and ' (скопировано)' or ''), result)
+    sf.ui.text('Перевод: ' .. name, result)
   end)
 end)
