@@ -1,7 +1,7 @@
 local manifest = {
   id = 'wam.translator',
   name = 'Slonobass Переводчик',
-  version = '2.3',
+  version = '2.4',
   author = 'Slonobass',
   minApiVersion = 4,
   testedApiVersion = 4,
@@ -13,6 +13,7 @@ local manifest = {
   },
   commands = {
     { id = 'translate', title = 'Перевести текст на выбранный язык', menu = true },
+    { id = 'check', title = 'Проверка экрана', menu = true },
   },
 }
 
@@ -171,6 +172,23 @@ table.sort(ALL, function(a, b) return sortKey(a.name) < sortKey(b.name) end)
 
 -- Лимит одного запроса к службе перевода — 5000 символов, берём с запасом.
 local MAX_CHARS = 4500
+
+-- Окна на экране, верхнее первым. SandFly ищет элементы только в активном окне,
+-- а поле ввода может лежать в оверлее другого приложения (например, в диалоге
+-- TalkBack), поэтому при неудаче ищем по всем окнам.
+local function screenWindows()
+  local ok, list = pcall(sf.screen.windows)
+  if ok and type(list) == 'table' then return list end
+  return {}
+end
+
+-- Сверху экрана оверлей другого приложения (например, собственный диалог TalkBack)?
+-- Над таким окном полноэкранное окно скрипта может не появиться, поэтому тогда
+-- показываем компактный диалог.
+local function overlayOnTop()
+  local list = screenWindows()
+  return list[1] ~= nil and list[1].type == 'accessibilityOverlay'
+end
 
 local function trim(s)
   return (s:gsub('^%s+', ''):gsub('%s+$', ''))
@@ -344,7 +362,8 @@ end
 -- Окно со всеми языками: поиск сверху, список ниже. Двойной удар по языку
 -- сразу переводит на него, а в меню действий у каждой строки — «Добавить в избранное».
 local function openAllLanguages(onPick)
-  sf.ui.window({
+  local show = overlayOnTop() and sf.ui.dialog or sf.ui.window
+  show({
     title = 'Все языки',
     items = {
       {
@@ -388,7 +407,8 @@ local function openFavorites(onPick)
     onPick(code)
   end
 
-  favoritesWindow = sf.ui.window({
+  local show = overlayOnTop() and sf.ui.dialog or sf.ui.window
+  favoritesWindow = show({
     title = 'Куда перевести?',
     items = {
       {
@@ -437,9 +457,17 @@ local function openFavorites(onPick)
   })
 end
 
+-- Первое редактируемое поле внутри окна.
+local function windowField(root)
+  if not root then return nil end
+  local ok, item = pcall(root.find, root, { editable = true })
+  if ok and item and item.editable then return item end
+end
+
 -- Поле ввода: сначала то, куда печатает клавиатура, затем элемент в фокусе SandFly,
--- затем любой редактируемый элемент с фокусом. В части диалогов (например, «Название»
--- в TalkBack) inputFocused() не отвечает, хотя поле на экране есть и в нём можно печатать.
+-- затем любой редактируемый элемент: в активном окне, потом в каждом окне на экране.
+-- В части диалогов (например, «Название» в TalkBack) inputFocused() не отвечает,
+-- хотя поле на экране есть и в нём можно печатать.
 local function editableField()
   local ok, item = pcall(sf.screen.inputFocused)
   if ok and item and item.editable then return item end
@@ -447,6 +475,12 @@ local function editableField()
   if ok and item and item.editable then return item end
   ok, item = pcall(sf.screen.find, { editable = true, focused = true })
   if ok and item and item.editable then return item end
+  ok, item = pcall(sf.screen.find, { editable = true })
+  if ok and item and item.editable then return item end
+  for _, w in ipairs(screenWindows()) do
+    item = windowField(w.root)
+    if item then return item end
+  end
 end
 
 -- Длина в единицах Android (UTF-16): так считают позиции выделения и курсора.
@@ -471,7 +505,8 @@ local function getText()
   local field, fieldText = inputField()
   if fieldText then return fieldText, field end
 
-  local item = sf.screen.focused()
+  local okFocus, item = pcall(sf.screen.focused)
+  if not okFocus then item = nil end
   if item then
     for _, name in ipairs({ 'text', 'contentDescription' }) do
       local value = item[name]
@@ -578,7 +613,7 @@ local function replaceInField(original, translated, clipboardReady)
   return false, 'поле не принимает текст'
 end
 
-sf.onCommand('translate', function()
+local function runTranslate()
   local text, field = getText()
   if not text or text == '' then return end
 
@@ -619,4 +654,63 @@ sf.onCommand('translate', function()
 
     sf.ui.text('Перевод: ' .. name, result)
   end)
+end
+
+-- Ошибка внутри команды раньше умирала молча: в приложении не открывалось ни окна,
+-- ни объяснения. Теперь причина называется вслух.
+sf.onCommand('translate', function()
+  local ok, err = pcall(runTranslate)
+  if not ok then
+    pcall(sf.speak, 'Скрипт остановился с ошибкой: ' .. tostring(err))
+    pcall(sf.ui.alert, 'Скрипт остановился с ошибкой:\n\n' .. tostring(err), { title = 'Ошибка перевода' })
+  end
+end)
+
+-- Короткое описание элемента для диагностики.
+local function describe(item)
+  if not item then return 'нет' end
+  local name = item.id or item.className or 'без идентификатора'
+  local text = trim(tostring(item.text or item.contentDescription or ''))
+  if text ~= '' then return tostring(name) .. ', текст: ' .. shorten(text, 40) end
+  return tostring(name)
+end
+
+-- Диагностика: что скрипт видит на экране. Нужна, когда в каком-то приложении
+-- ничего не открывается: называет приложение, окна, поле ввода и фокус SandFly.
+sf.onCommand('check', function()
+  local ok, err = pcall(function()
+    local lines = {}
+
+    local okApp, app = pcall(sf.app)
+    if okApp and type(app) == 'table' then
+      lines[#lines + 1] = 'Приложение: ' .. tostring(app.label) .. ', ' .. tostring(app.package)
+    else
+      lines[#lines + 1] = 'Приложение не определено'
+    end
+
+    local list = screenWindows()
+    lines[#lines + 1] = 'Окон на экране: ' .. #list
+    for i, w in ipairs(list) do
+      local flags = {}
+      if w.active then flags[#flags + 1] = 'активное' end
+      if w.focused then flags[#flags + 1] = 'с вводом' end
+      lines[#lines + 1] = 'Окно ' .. i .. ': ' .. tostring(w.type)
+        .. (w.title and (', ' .. tostring(w.title)) or '')
+        .. (#flags > 0 and (', ' .. table.concat(flags, ', ')) or '')
+    end
+
+    lines[#lines + 1] = 'Поле ввода: ' .. describe(editableField())
+
+    local okFocus, focused = pcall(sf.screen.focused)
+    lines[#lines + 1] = 'Фокус SandFly: ' .. describe(okFocus and focused or nil)
+
+    for _, line in ipairs(lines) do sf.speak(line) end
+
+    -- Последняя проверка: показываются ли в этом приложении окна вообще.
+    sf.speak('Сейчас откроется проверочное окно. Если его не видно — просто уйди в другое приложение.')
+    pcall(sf.ui.alert,
+      'Проверочное окно открылось. Значит, окна здесь показываются.',
+      { title = 'Проверка' })
+  end)
+  if not ok then pcall(sf.speak, 'Диагностика не получилась: ' .. tostring(err)) end
 end)
