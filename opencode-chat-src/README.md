@@ -37,10 +37,23 @@ llama.cpp для офлайн-моделей GGUF и инструкция для
 
 ## Провайдеры
 
-В `projects/opencode.json` можно добавить любой OpenAI-совместимый сервис:
+Кнопка «Другие сервисы…» подключает любой сервис с адресом в стиле OpenAI:
+ключ вводится в окне, программа сама забирает список моделей с `…/models`
+и пишет провайдер `other` в `projects/opencode.json` (ключ передаётся
+движку переменной окружения `POLZA_API_KEY`, сам ключ лежит в файле под DPAPI):
 
 - Polza.ai — `https://polza.ai/api/v1`, ключ `pza_…`, модели вида `vendor/model`;
-- AnyModel — `https://anymodel.org/v1`, один ключ на GPT, Claude, Gemini, DeepSeek.
+- AnyModel — `https://anymodel.org/v1`, один ключ на GPT, Claude, Gemini, DeepSeek;
+- «Свой адрес…» — любой совместимый шлюз.
+
+## Правила для модели
+
+При старте программа пишет `projects/AGENTS.md` (файл помечен
+`<!-- Slonobass agent -->`; чужой файл без метки не трогается) и разрешает
+в `opencode.json` инструменты `websearch` и `webfetch`: в неинтерактивном
+запуске движок иначе отклоняет их с «Cancelled a request for input this run
+cannot answer». Если веб-поиск недоступен (нет ключа провайдера поиска),
+модель по правилам открывает выдачу DuckDuckGo Lite или Bing через `webfetch`.
 
 ## Управление перепиской
 

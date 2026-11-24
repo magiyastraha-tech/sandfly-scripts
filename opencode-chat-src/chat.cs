@@ -65,6 +65,7 @@ namespace OpenCodeChat
         private Button newChatBtn;
         private Button logBtn;
         private Button profileBtn;
+        private Button serviceBtn;
         private Button addModelBtn;
         private ComboBox modelBox;
         private Label startedLabel;
@@ -246,6 +247,14 @@ namespace OpenCodeChat
             profileBtn.Click += delegate { OpenProfile(); };
             header.Controls.Add(profileBtn);
 
+            serviceBtn = new Button();
+            serviceBtn.Text = "Дру&гие сервисы…";
+            serviceBtn.AutoSize = true;
+            serviceBtn.AccessibleName = "Другие сервисы";
+            serviceBtn.AccessibleDescription = "Polza.ai, AnyModel или свой адрес: ключ и список моделей";
+            serviceBtn.Click += delegate { OpenOtherService(); };
+            header.Controls.Add(serviceBtn);
+
             newChatBtn = new Button();
             newChatBtn.Text = "&Новый разговор";
             newChatBtn.AutoSize = true;
@@ -381,16 +390,21 @@ namespace OpenCodeChat
             Controls.Add(announcer);
 
             announceTimer = new System.Windows.Forms.Timer();
-            announceTimer.Interval = 450;
+            // Пауза нужна, чтобы диктор успел закончить короткую реплику
+            // о переходе, прежде чем начнётся чтение сообщения целиком.
+            announceTimer.Interval = 700;
             announceTimer.Tick += delegate
             {
                 announceTimer.Stop();
                 if (pendingAnnounce.Length == 0) return;
+                // Только имя доступности: смена Text поднимает ещё одно событие
+                // и диктор начинает читать заново с начала, обрывая себя же.
                 announcer.AccessibleName = pendingAnnounce;
-                announcer.Text = pendingAnnounce;
                 try
                 {
-                    NotifyWinEvent(0x800C, announcer.Handle, -4, 0);
+                    // Одно событие на всё сообщение. Два события подряд
+                    // (NAME_CHANGE и ALERT) диктор обрабатывает как два
+                    // сообщения и второе обрывает первое на середине.
                     NotifyWinEvent(0x0002, announcer.Handle, -4, 0);
                 }
                 catch
@@ -438,7 +452,8 @@ namespace OpenCodeChat
                 return;
             }
             Log.Write("START", "Движок: " + exePath + "; рабочая папка: " + projectsDir + "; Загрузки: " + downloadsDir
-                + "; профиль DeepSeek: " + (Profile.HasKey ? "подключён " + Profile.Hint : "нет"));
+                + "; профиль DeepSeek: " + (Profile.HasKey ? "подключён " + Profile.Hint : "нет")
+                + "; другой сервис: " + (Service.HasProfile ? Service.Label + " " + Service.Hint : "нет"));
             if (Profile.HasKey && statusLabel.Text == "Готов") statusLabel.Text = "Готов. Мой профиль DeepSeek подключён: " + Profile.Hint;
             input.Focus();
             LoadModels();
@@ -706,8 +721,13 @@ namespace OpenCodeChat
 
         private void SelectBlock(int[] range)
         {
+            // Ставим только курсор, без выделения всего сообщения.
+            // Выделенный текст диктор тоже читает сам — и тогда вместе
+            // с оповещением получается два чтения подряд: второе обрывает
+            // первое, и конец сообщения не слышен. Курсор нужен лишь для
+            // того, чтобы следующая стрелка знала, от какого сообщения идти.
+            transcript.SelectionLength = 0;
             transcript.SelectionStart = range[0];
-            transcript.SelectionLength = range[1] - range[0];
             transcript.ScrollToCaret();
             Announce(transcript.Text.Substring(range[0], range[1] - range[0]));
         }
@@ -1128,9 +1148,11 @@ namespace OpenCodeChat
                     psi.StandardOutputEncoding = Encoding.UTF8;
                     psi.StandardErrorEncoding = Encoding.UTF8;
                     Profile.Apply(psi);
+                    Service.Apply(psi);
 
                     Log.Write("RUN", "opencode " + psi.Arguments.Replace("\r\n", "\\n").Replace("\n", "\\n")
-                        + " [профиль: " + (Profile.HasKey ? "свой ключ" : "бесплатные") + "]");
+                        + " [профиль: " + (Profile.HasKey ? "свой ключ" : "бесплатные")
+                        + (Service.HasProfile ? "; сервис: " + Service.Label : "") + "]");
 
                     using (Process p = new Process())
                     {
@@ -1309,14 +1331,13 @@ namespace OpenCodeChat
                 statusLabel.Text = "Остановлено. Что успело прийти — в переписке.";
             }
 
-            // Выделяем ответ целиком: диктор читает его одним блоком,
-            // а не по кускам вокруг каретки.
+            // Курсор — на начало ответа: отсюда стрелки продолжают работу,
+            // а сам текст читает оповещение целиком (выделение не делаем,
+            // иначе диктор читает его вторым разом и обрывает).
             string full = transcript.Text;
             int answerStart = FirstText(start);
-            int answerEnd = full.Length;
-            while (answerEnd > answerStart && IsBlankChar(full[answerEnd - 1])) answerEnd--;
+            transcript.SelectionLength = 0;
             transcript.SelectionStart = answerStart;
-            transcript.SelectionLength = Math.Max(0, answerEnd - answerStart);
             transcript.ScrollToCaret();
             transcript.Focus();
             Sounds.Incoming();
@@ -1639,6 +1660,29 @@ namespace OpenCodeChat
             }
         }
 
+        private void OpenOtherService()
+        {
+            using (ServiceForm f = new ServiceForm())
+            {
+                DialogResult r = f.ShowDialog(this);
+                if (r != DialogResult.OK) return;
+                WriteOfflineConfig();
+                if (Service.HasProfile)
+                {
+                    statusLabel.Text = Service.Label + " подключён: " + Service.Hint
+                        + ". Модели в списке моделей.";
+                    Log.Write("SERVICE", Service.Label + " сохранён (" + Service.Hint
+                        + "), моделей: " + Service.Models.Length.ToString());
+                }
+                else
+                {
+                    statusLabel.Text = "Другой сервис отключён.";
+                    Log.Write("SERVICE", "Другой сервис отключён");
+                }
+                LoadModels();
+            }
+        }
+
         private FileItem SelectedFile()
         {
             if (filesView.SelectedItems.Count == 0) return null;
@@ -1678,6 +1722,7 @@ namespace OpenCodeChat
                     psi.StandardOutputEncoding = Encoding.UTF8;
                     psi.StandardErrorEncoding = Encoding.UTF8;
                     Profile.Apply(psi);
+                    Service.Apply(psi);
                     using (Process p = Process.Start(psi))
                     {
                         string outp = p.StandardOutput.ReadToEnd();
@@ -1701,7 +1746,8 @@ namespace OpenCodeChat
                     Log.Exception("Список моделей", ex);
                 }
                 Log.Write("MODELS", "Найдено моделей: " + found.Count.ToString()
-                    + "; профиль DeepSeek: " + (Profile.HasKey ? "подключён " + Profile.Hint : "нет"));
+                    + "; профиль DeepSeek: " + (Profile.HasKey ? "подключён " + Profile.Hint : "нет")
+                    + "; другой сервис: " + (Service.HasProfile ? Service.Label + " " + Service.Hint : "нет"));
                 try
                 {
                     BeginInvoke(new Action(delegate { FillModels(found); }));
@@ -1736,6 +1782,7 @@ namespace OpenCodeChat
             if (keep.Length == 0) keep = preferredModel;
 
             List<string> mine = new List<string>();
+            List<string> others = new List<string>();
             List<string> free = new List<string>();
             for (int i = 0; i < found.Count; i++)
             {
@@ -1743,6 +1790,7 @@ namespace OpenCodeChat
                 // для офлайн-файлов строим сами: у движка это одна модель без файла.
                 if (found[i].StartsWith("offline/", StringComparison.OrdinalIgnoreCase)) continue;
                 if (found[i].StartsWith("deepseek/", StringComparison.OrdinalIgnoreCase)) mine.Add(found[i]);
+                else if (found[i].StartsWith("other/", StringComparison.OrdinalIgnoreCase)) others.Add(found[i]);
                 else free.Add(found[i]);
             }
             if (Profile.HasKey && mine.Count == 0)
@@ -1765,6 +1813,11 @@ namespace OpenCodeChat
             for (int i = 0; i < mine.Count; i++)
             {
                 modelBox.Items.Add(new ModelItem(mine[i], "Мой профиль — " + ShortName(mine[i]), true));
+            }
+            string serviceLabel = Service.HasProfile ? Service.Label : "Другой сервис";
+            for (int i = 0; i < others.Count; i++)
+            {
+                modelBox.Items.Add(new ModelItem(others[i], serviceLabel + " — " + ShortName(others[i]), true));
             }
             for (int i = 0; i < free.Count; i++) modelBox.Items.Add(new ModelItem(free[i]));
 
@@ -1803,6 +1856,8 @@ namespace OpenCodeChat
                 desc.Append("Сверху офлайн-модели (" + ggufs.Count.ToString() + ") — файлы .gguf с этого компьютера. ");
             if (Profile.HasKey)
                 desc.Append("Раздел «Мой профиль» — модели вашего аккаунта DeepSeek (" + mine.Count.ToString() + "). ");
+            if (others.Count > 0)
+                desc.Append("Раздел «" + serviceLabel + "» — модели другого сервиса (" + others.Count.ToString() + "). ");
             desc.Append("Ниже бесплатные модели. Кнопка «Добавить модель» добавляет файл .gguf.");
             modelBox.AccessibleDescription = desc.ToString();
         }
@@ -1953,6 +2008,15 @@ namespace OpenCodeChat
                 sb.AppendLine("{");
                 sb.AppendLine("  \"$schema\": \"https://opencode.ai/config.json\",");
                 sb.AppendLine("  \"model\": \"opencode/deepseek-v4.1-flash-free\",");
+                // В неинтерактивном запуске движок сам отклоняет всё, что требует
+                // подтверждения («Cancelled a request for input this run cannot
+                // answer»). Поэтому поиск и загрузка страниц разрешены сразу:
+                // иначе веб-поиск молча отменяется, а модель отвечает «не нашёл».
+                sb.AppendLine("  \"permission\": {");
+                sb.AppendLine("    \"question\": \"deny\",");
+                sb.AppendLine("    \"websearch\": \"allow\",");
+                sb.AppendLine("    \"webfetch\": \"allow\"");
+                sb.AppendLine("  },");
                 sb.AppendLine("  \"provider\": {");
                 sb.AppendLine("    \"offline\": {");
                 sb.AppendLine("      \"npm\": \"@ai-sdk/openai-compatible\",");
@@ -1967,16 +2031,98 @@ namespace OpenCodeChat
                 sb.AppendLine("          \"limit\": { \"context\": " + limitCtx.ToString() + ", \"output\": " + output.ToString() + " }");
                 sb.AppendLine("        }");
                 sb.AppendLine("      }");
-                sb.AppendLine("    }");
+                bool other = Service.HasProfile && Service.Models.Length > 0;
+                sb.AppendLine(other ? "    }," : "    }");
+                if (other)
+                {
+                    string baseUrl = Service.BaseUrl.TrimEnd('/');
+                    sb.AppendLine("    \"other\": {");
+                    sb.AppendLine("      \"npm\": \"@ai-sdk/openai-compatible\",");
+                    sb.AppendLine("      \"name\": \"" + JsonEscape(Service.Label) + "\",");
+                    sb.AppendLine("      \"api\": \"" + JsonEscape(baseUrl) + "\",");
+                    sb.AppendLine("      \"options\": { \"baseURL\": \"" + JsonEscape(baseUrl)
+                        + "\", \"apiKey\": \"${env:POLZA_API_KEY}\" },");
+                    sb.AppendLine("      \"models\": {");
+                    string[] ids = Service.Models;
+                    for (int i = 0; i < ids.Length; i++)
+                    {
+                        string id = JsonEscape(ids[i]);
+                        sb.AppendLine("        \"" + id + "\": { \"id\": \"" + id
+                            + "\", \"name\": \"" + id + "\", \"tool_call\": true }"
+                            + (i + 1 < ids.Length ? "," : ""));
+                    }
+                    sb.AppendLine("      }");
+                    sb.AppendLine("    }");
+                }
                 sb.AppendLine("  }");
                 sb.AppendLine("}");
                 File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+                WriteAgentRules();
                 Log.Write("OFFLINE", "Конфиг движка записан: " + path);
             }
             catch (Exception ex)
             {
                 Log.Exception("Конфиг движка", ex);
             }
+        }
+
+        // Правила для модели. Без них она при недоступном веб-поиске просто
+        // отвечает «не нашёл» и перестаёт искать другими способами.
+        private void WriteAgentRules()
+        {
+            const string marker = "<!-- Slonobass agent -->";
+            try
+            {
+                string path = Path.Combine(projectsDir, "AGENTS.md");
+                if (File.Exists(path))
+                {
+                    string head = "";
+                    using (StreamReader r = new StreamReader(path, Encoding.UTF8))
+                    {
+                        char[] buf = new char[200];
+                        int n = r.Read(buf, 0, buf.Length);
+                        head = new string(buf, 0, n);
+                    }
+                    if (head.IndexOf(marker, StringComparison.Ordinal) < 0) return;
+                }
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine(marker);
+                sb.AppendLine("# Правила работы");
+                sb.AppendLine();
+                sb.AppendLine("Ты — помощник внутри программы Slonobass agent. Отвечай по-русски, коротко и по делу.");
+                sb.AppendLine();
+                sb.AppendLine("## Поиск в интернете");
+                sb.AppendLine("1. Сначала попробуй инструмент websearch.");
+                sb.AppendLine("2. Если поиск недоступен, вернул ошибку или пустой результат — открой страницу поиска через webfetch:");
+                sb.AppendLine("   https://lite.duckduckgo.com/lite/?q=ЗАПРОС (вместо пробелов поставь +)");
+                sb.AppendLine("3. Если не открылось — https://www.bing.com/search?q=ЗАПРОС");
+                sb.AppendLine("4. Ссылки из выдачи открывай через webfetch и читай текст страницы, а не догадывайся по названию.");
+                sb.AppendLine("5. Если в вопросе есть название сервиса или адрес сайта — попробуй сразу открыть этот сайт через webfetch.");
+                sb.AppendLine("6. Если не удалось ничего — честно скажи, что поиск сейчас не работает. Не выдумывай факты, цены и ссылки.");
+                sb.AppendLine();
+                sb.AppendLine("## Файлы");
+                sb.AppendLine("Новые файлы создавай только тогда, когда об этом прямо просят.");
+                File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+            }
+            catch (Exception ex)
+            {
+                Log.Exception("Правила для модели", ex);
+            }
+        }
+
+        private static string JsonEscape(string s)
+        {
+            if (s == null) return "";
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (c == '"') sb.Append("\\\"");
+                else if (c == '\\') sb.Append("\\\\");
+                else if (c < ' ') sb.Append("\\u").Append(((int)c).ToString("x4"));
+                else sb.Append(c);
+            }
+            return sb.ToString();
         }
 
         private static bool HttpOk(string url)
@@ -2440,6 +2586,146 @@ namespace OpenCodeChat
         }
     }
 
+    // Другой сервис: Polza.ai, AnyModel или любой адрес, совместимый с OpenAI.
+    // Ключ лежит в защищённом файле и передаётся движку переменной окружения.
+    internal static class Service
+    {
+        private static bool loaded;
+        private static string key = "";
+        private static string baseUrl = "";
+        private static string label = "";
+        private static string[] models = new string[0];
+
+        private static string Dir
+        {
+            get
+            {
+                return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "OpenCodeChat");
+            }
+        }
+
+        private static string KeyPath { get { return Path.Combine(Dir, "service.key"); } }
+        private static string InfoPath { get { return Path.Combine(Dir, "service.txt"); } }
+
+        public static string Key
+        {
+            get { Load(); return key; }
+        }
+
+        public static string BaseUrl
+        {
+            get { Load(); return baseUrl; }
+        }
+
+        public static string Label
+        {
+            get { Load(); return label.Length > 0 ? label : "Другой сервис"; }
+        }
+
+        public static string[] Models
+        {
+            get { Load(); return models; }
+        }
+
+        public static bool HasProfile
+        {
+            get { return Key.Length > 0 && BaseUrl.Length > 0; }
+        }
+
+        public static string Hint
+        {
+            get
+            {
+                string k = Key;
+                if (k.Length == 0) return "не подключён";
+                if (k.Length <= 8) return "ключ сохранён";
+                return "ключ …" + k.Substring(k.Length - 4);
+            }
+        }
+
+        public static void Save(string serviceLabel, string serviceUrl, string serviceKey, string[] serviceModels)
+        {
+            Load();
+            key = serviceKey == null ? "" : serviceKey.Trim();
+            baseUrl = serviceUrl == null ? "" : serviceUrl.Trim().TrimEnd('/');
+            label = serviceLabel == null ? "" : serviceLabel.Trim();
+            models = serviceModels == null ? new string[0] : serviceModels;
+            try
+            {
+                if (!Directory.Exists(Dir)) Directory.CreateDirectory(Dir);
+                byte[] data = Encoding.UTF8.GetBytes(key);
+                byte[] prot = ProtectedData.Protect(data, null, DataProtectionScope.CurrentUser);
+                File.WriteAllBytes(KeyPath, prot);
+                List<string> lines = new List<string>();
+                lines.Add(label);
+                lines.Add(baseUrl);
+                for (int i = 0; i < models.Length; i++) lines.Add(models[i]);
+                File.WriteAllLines(InfoPath, lines.ToArray(), new UTF8Encoding(false));
+                loaded = true;
+            }
+            catch (Exception ex)
+            {
+                Log.Exception("Сохранение другого сервиса", ex);
+            }
+        }
+
+        public static void Clear()
+        {
+            try
+            {
+                if (File.Exists(KeyPath)) File.Delete(KeyPath);
+                if (File.Exists(InfoPath)) File.Delete(InfoPath);
+            }
+            catch (Exception ex)
+            {
+                Log.Exception("Удаление другого сервиса", ex);
+            }
+            key = "";
+            baseUrl = "";
+            label = "";
+            models = new string[0];
+            loaded = true;
+        }
+
+        public static void Apply(ProcessStartInfo psi)
+        {
+            string k = Key;
+            if (k.Length > 0) psi.EnvironmentVariables["POLZA_API_KEY"] = k;
+        }
+
+        private static void Load()
+        {
+            if (loaded) return;
+            loaded = true;
+            try
+            {
+                if (File.Exists(KeyPath))
+                {
+                    byte[] prot = File.ReadAllBytes(KeyPath);
+                    byte[] data = ProtectedData.Unprotect(prot, null, DataProtectionScope.CurrentUser);
+                    key = Encoding.UTF8.GetString(data).Trim();
+                }
+                if (File.Exists(InfoPath))
+                {
+                    string[] lines = File.ReadAllLines(InfoPath, Encoding.UTF8);
+                    if (lines.Length > 0) label = lines[0].Trim();
+                    if (lines.Length > 1) baseUrl = lines[1].Trim();
+                    List<string> list = new List<string>();
+                    for (int i = 2; i < lines.Length; i++)
+                    {
+                        string s = lines[i].Trim();
+                        if (s.Length > 0) list.Add(s);
+                    }
+                    models = list.ToArray();
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Exception("Чтение другого сервиса", ex);
+            }
+        }
+    }
+
     internal sealed class ProfileForm : Form
     {
         private TextBox keyBox;
@@ -2596,6 +2882,423 @@ namespace OpenCodeChat
                 Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question);
             if (r != DialogResult.Yes) return;
             Profile.Clear();
+            DialogResult = DialogResult.OK;
+            Close();
+        }
+    }
+
+    internal sealed class ServiceForm : Form
+    {
+        private static readonly string[] PresetNames = new string[]
+        {
+            "Polza.ai — polza.ai/api/v1",
+            "AnyModel — anymodel.org/v1",
+            "Свой адрес…"
+        };
+        private static readonly string[] PresetUrls = new string[]
+        {
+            "https://polza.ai/api/v1",
+            "https://anymodel.org/v1",
+            ""
+        };
+        private static readonly string[] PresetLabels = new string[]
+        {
+            "Polza.ai",
+            "AnyModel",
+            ""
+        };
+
+        private ComboBox presetBox;
+        private TextBox baseBox;
+        private TextBox keyBox;
+        private CheckBox showBox;
+        private CheckedListBox modelsList;
+        private Label stateLabel;
+        private Button checkBtn;
+        private Button saveBtn;
+
+        public ServiceForm()
+        {
+            Text = "Другие сервисы";
+            StartPosition = FormStartPosition.CenterParent;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            ShowInTaskbar = false;
+            ClientSize = new Size(760, 650);
+            Font = new Font("Segoe UI", 10f);
+
+            Label intro = new Label();
+            intro.Text = "Polza.ai, AnyModel или любой сервис с адресом в стиле OpenAI.\r\n\r\n"
+                + "Положите сюда ключ и отметьте нужные модели — они появятся сверху в списке "
+                + "моделей отдельным разделом. Запросы пойдут на ваш аккаунт в этом сервисе, "
+                + "на ваши оплаченные токены.\r\n\r\n"
+                + "Ключ хранится только на этом компьютере и защищён учётной записью Windows.";
+            intro.Location = new Point(14, 10);
+            intro.Size = new Size(732, 96);
+            intro.AccessibleName = "Описание";
+            Controls.Add(intro);
+
+            stateLabel = new Label();
+            stateLabel.Location = new Point(14, 108);
+            stateLabel.Size = new Size(732, 24);
+            stateLabel.AccessibleName = "Состояние сервиса";
+            Controls.Add(stateLabel);
+
+            Label presetLabel = new Label();
+            presetLabel.Text = "&Сервис:";
+            presetLabel.Location = new Point(14, 140);
+            presetLabel.Size = new Size(200, 22);
+            Controls.Add(presetLabel);
+
+            presetBox = new ComboBox();
+            presetBox.DropDownStyle = ComboBoxStyle.DropDownList;
+            presetBox.Location = new Point(14, 162);
+            presetBox.Width = 420;
+            presetBox.AccessibleName = "Сервис";
+            presetBox.AccessibleDescription = "Polza.ai, AnyModel или свой адрес";
+            for (int i = 0; i < PresetNames.Length; i++) presetBox.Items.Add(PresetNames[i]);
+            presetBox.SelectedIndexChanged += delegate { ApplyPreset(); };
+            Controls.Add(presetBox);
+
+            Label baseLabel = new Label();
+            baseLabel.Text = "&Адрес API:";
+            baseLabel.Location = new Point(14, 196);
+            baseLabel.Size = new Size(200, 22);
+            Controls.Add(baseLabel);
+
+            baseBox = new TextBox();
+            baseBox.Location = new Point(14, 218);
+            baseBox.Width = 732;
+            baseBox.AccessibleName = "Адрес API";
+            baseBox.AccessibleDescription = "Например https://polza.ai/api/v1";
+            Controls.Add(baseBox);
+
+            Label keyLabel = new Label();
+            keyLabel.Text = "&Ключ сервиса:";
+            keyLabel.Location = new Point(14, 252);
+            keyLabel.Size = new Size(300, 22);
+            Controls.Add(keyLabel);
+
+            keyBox = new TextBox();
+            keyBox.Location = new Point(14, 274);
+            keyBox.Width = 540;
+            keyBox.UseSystemPasswordChar = true;
+            keyBox.AccessibleName = "Ключ сервиса";
+            keyBox.AccessibleDescription = "Ключ Polza.ai начинается с pza_";
+            Controls.Add(keyBox);
+
+            showBox = new CheckBox();
+            showBox.Text = "По&казать ключ";
+            showBox.Location = new Point(566, 274);
+            showBox.Size = new Size(180, 24);
+            showBox.CheckedChanged += delegate { keyBox.UseSystemPasswordChar = !showBox.Checked; };
+            Controls.Add(showBox);
+
+            checkBtn = new Button();
+            checkBtn.Text = "&Проверить и получить модели";
+            checkBtn.Location = new Point(14, 310);
+            checkBtn.Size = new Size(260, 30);
+            checkBtn.AccessibleName = "Проверить ключ и получить список моделей";
+            checkBtn.Click += delegate { CheckModels(); };
+            Controls.Add(checkBtn);
+
+            Label modelsLabel = new Label();
+            modelsLabel.Text = "Моде&ли сервиса — отметьте нужные (пробел):";
+            modelsLabel.Location = new Point(14, 348);
+            modelsLabel.Size = new Size(600, 22);
+            Controls.Add(modelsLabel);
+
+            modelsList = new CheckedListBox();
+            modelsList.Location = new Point(14, 370);
+            modelsList.Size = new Size(732, 200);
+            modelsList.CheckOnClick = true;
+            modelsList.AccessibleName = "Модели сервиса";
+            Controls.Add(modelsList);
+
+            Label fetchLabel = new Label();
+            fetchLabel.Location = new Point(14, 576);
+            fetchLabel.Size = new Size(732, 22);
+            fetchLabel.AccessibleName = "Результат проверки";
+            fetchLabel.Name = "fetchLabel";
+            Controls.Add(fetchLabel);
+
+            Panel bottom = new Panel();
+            bottom.Dock = DockStyle.Bottom;
+            bottom.Height = 52;
+
+            saveBtn = new Button();
+            saveBtn.Text = "&Сохранить";
+            saveBtn.Width = 130;
+            saveBtn.Location = new Point(14, 12);
+            saveBtn.AccessibleName = "Сохранить сервис";
+            saveBtn.Click += delegate { SaveProfile(); };
+            bottom.Controls.Add(saveBtn);
+
+            Button deleteBtn = new Button();
+            deleteBtn.Text = "&Удалить сервис";
+            deleteBtn.Width = 130;
+            deleteBtn.Location = new Point(154, 12);
+            deleteBtn.AccessibleName = "Удалить другой сервис";
+            deleteBtn.Enabled = Service.HasProfile;
+            deleteBtn.Click += delegate { DeleteProfile(); };
+            bottom.Controls.Add(deleteBtn);
+
+            Button cancelBtn = new Button();
+            cancelBtn.Text = "Отмена";
+            cancelBtn.Width = 110;
+            cancelBtn.Location = new Point(294, 12);
+            cancelBtn.DialogResult = DialogResult.Cancel;
+            bottom.Controls.Add(cancelBtn);
+
+            Controls.Add(bottom);
+            AcceptButton = saveBtn;
+            CancelButton = cancelBtn;
+
+            LoadExisting();
+        }
+
+        private void LoadExisting()
+        {
+            string url = Service.BaseUrl;
+            int preset = PresetUrls.Length - 1;
+            for (int i = 0; i < PresetUrls.Length - 1; i++)
+            {
+                if (PresetUrls[i].Length > 0 && string.Equals(url, PresetUrls[i], StringComparison.OrdinalIgnoreCase))
+                {
+                    preset = i;
+                    break;
+                }
+            }
+            presetBox.SelectedIndex = preset;
+            if (url.Length > 0) baseBox.Text = url;
+            else baseBox.Text = PresetUrls[0];
+            baseBox.ReadOnly = preset != PresetUrls.Length - 1;
+            keyBox.Text = Service.Key;
+            string[] saved = Service.Models;
+            modelsList.Items.Clear();
+            for (int i = 0; i < saved.Length; i++) modelsList.Items.Add(saved[i], true);
+            UpdateState();
+        }
+
+        private void UpdateState()
+        {
+            if (Service.HasProfile)
+                stateLabel.Text = "Сейчас: " + Service.Label + ", " + Service.Hint
+                    + ", моделей: " + Service.Models.Length.ToString() + ".";
+            else
+                stateLabel.Text = "Сейчас: другой сервис не подключён.";
+        }
+
+        private void ApplyPreset()
+        {
+            int i = presetBox.SelectedIndex;
+            if (i < 0) return;
+            bool own = i == PresetUrls.Length - 1;
+            baseBox.ReadOnly = !own;
+            if (!own) baseBox.Text = PresetUrls[i];
+            keyBox.AccessibleDescription = i == 0 ? "Ключ Polza.ai начинается с pza_" : "Ключ сервиса";
+        }
+
+        private string CurrentLabel()
+        {
+            int i = presetBox.SelectedIndex;
+            if (i >= 0 && i < PresetLabels.Length && PresetLabels[i].Length > 0) return PresetLabels[i];
+            string url = baseBox.Text.Trim();
+            try { return new Uri(url).Host; }
+            catch { return "Другой сервис"; }
+        }
+
+        private void CheckModels()
+        {
+            string url = baseBox.Text.Trim().TrimEnd('/');
+            string k = keyBox.Text.Trim();
+            if (k.Length == 0)
+            {
+                MessageBox.Show(this, "Введите ключ сервиса.", Text,
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                keyBox.Focus();
+                return;
+            }
+            if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                && !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show(this, "Адрес API должен начинаться с http:// или https://.", Text,
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                baseBox.Focus();
+                return;
+            }
+            stateLabel.Text = "Проверяю ключ и получаю список моделей…";
+            checkBtn.Enabled = false;
+            saveBtn.Enabled = false;
+            Thread t = new Thread(delegate()
+            {
+                List<string> found = new List<string>();
+                string err = null;
+                try
+                {
+                    string body = FetchModels(url + "/models", k);
+                    MatchCollection ms = Regex.Matches(body, "\"id\"\\s*:\\s*\"([^\"]+)\"");
+                    for (int i = 0; i < ms.Count; i++)
+                    {
+                        string id = ms[i].Groups[1].Value.Trim();
+                        if (id.Length == 0) continue;
+                        string low = id.ToLowerInvariant();
+                        if (low.IndexOf("embed") >= 0) continue;
+                        if (low.IndexOf("whisper") >= 0) continue;
+                        if (low.IndexOf("rerank") >= 0) continue;
+                        if (low.IndexOf("moderation") >= 0) continue;
+                        if (!found.Contains(id)) found.Add(id);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    err = Describe(ex);
+                }
+                try
+                {
+                    BeginInvoke(new Action(delegate { AfterCheck(found, err); }));
+                }
+                catch
+                {
+                }
+            });
+            t.IsBackground = true;
+            t.Start();
+        }
+
+        private void AfterCheck(List<string> found, string err)
+        {
+            checkBtn.Enabled = true;
+            saveBtn.Enabled = true;
+            Label fetchLabel = null;
+            for (int i = 0; i < Controls.Count; i++)
+            {
+                Label l = Controls[i] as Label;
+                if (l != null && l.Name == "fetchLabel") { fetchLabel = l; break; }
+            }
+            if (err != null)
+            {
+                stateLabel.Text = "Проверка не удалась: " + err;
+                if (fetchLabel != null) fetchLabel.Text = "Ключ не проверен. Можно сохранить и попробовать позже.";
+                return;
+            }
+            if (found.Count == 0)
+            {
+                stateLabel.Text = "Сервис ответил, но моделей в ответе нет.";
+                if (fetchLabel != null) fetchLabel.Text = "Проверьте адрес API: список моделей берётся с адреса …/models.";
+                return;
+            }
+            List<string> previous = new List<string>(Service.Models);
+            modelsList.Items.Clear();
+            for (int i = 0; i < found.Count; i++)
+            {
+                bool check = previous.Count == 0 || previous.Contains(found[i]);
+                modelsList.Items.Add(found[i], check);
+            }
+            stateLabel.Text = "Ключ принят. Найдено моделей: " + found.Count.ToString() + ".";
+            if (fetchLabel != null) fetchLabel.Text = "Отметьте нужные модели и нажмите «Сохранить».";
+        }
+
+        private static string Describe(Exception ex)
+        {
+            WebException we = ex as WebException;
+            if (we != null)
+            {
+                HttpWebResponse resp = we.Response as HttpWebResponse;
+                if (resp != null)
+                {
+                    string body = "";
+                    try
+                    {
+                        using (StreamReader r = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
+                            body = r.ReadToEnd();
+                    }
+                    catch { }
+                    body = body.Trim();
+                    if (body.Length > 300) body = body.Substring(0, 300) + "…";
+                    string code = ((int)resp.StatusCode).ToString() + " " + resp.StatusDescription;
+                    return body.Length > 0 ? code + ": " + body : code;
+                }
+                return we.Message;
+            }
+            return ex.Message;
+        }
+
+        private static string FetchModels(string url, string key)
+        {
+            try
+            {
+                ServicePointManager.SecurityProtocol = ServicePointManager.SecurityProtocol
+                    | SecurityProtocolType.Tls12;
+            }
+            catch
+            {
+            }
+            HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
+            req.Proxy = null;
+            req.Method = "GET";
+            req.Timeout = 20000;
+            req.ReadWriteTimeout = 20000;
+            req.KeepAlive = false;
+            req.UserAgent = "SlonobassAgent";
+            req.Accept = "application/json";
+            req.Headers["Authorization"] = "Bearer " + key;
+            using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
+            using (StreamReader r = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
+            {
+                return r.ReadToEnd();
+            }
+        }
+
+        private void SaveProfile()
+        {
+            string url = baseBox.Text.Trim().TrimEnd('/');
+            string k = keyBox.Text.Trim();
+            if (k.Length == 0)
+            {
+                MessageBox.Show(this, "Введите ключ сервиса. Чтобы отключить сервис, нажмите «Удалить сервис».",
+                    Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                keyBox.Focus();
+                return;
+            }
+            if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                && !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show(this, "Адрес API должен начинаться с http:// или https://.",
+                    Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                baseBox.Focus();
+                return;
+            }
+            List<string> selected = new List<string>();
+            for (int i = 0; i < modelsList.Items.Count; i++)
+            {
+                if (modelsList.GetItemChecked(i)) selected.Add(modelsList.Items[i].ToString());
+            }
+            if (selected.Count == 0)
+            {
+                MessageBox.Show(this,
+                    "Не отмечено ни одной модели.\r\n"
+                    + "Нажмите «Проверить и получить модели», отметьте нужные пробелом и сохраните.",
+                    Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                checkBtn.Focus();
+                return;
+            }
+            Service.Save(CurrentLabel(), url, k, selected.ToArray());
+            Log.Write("SERVICE", "Сохранён сервис " + CurrentLabel() + " (" + url + "), моделей: "
+                + selected.Count.ToString());
+            DialogResult = DialogResult.OK;
+            Close();
+        }
+
+        private void DeleteProfile()
+        {
+            DialogResult r = MessageBox.Show(this,
+                "Удалить ключ и список моделей другого сервиса?",
+                Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (r != DialogResult.Yes) return;
+            Service.Clear();
+            Log.Write("SERVICE", "Другой сервис удалён");
             DialogResult = DialogResult.OK;
             Close();
         }
