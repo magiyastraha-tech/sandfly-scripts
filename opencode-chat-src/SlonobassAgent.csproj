@@ -4,7 +4,7 @@
     <TargetFramework>net48</TargetFramework>
     <LangVersion>5</LangVersion>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
-    <AssemblyName>chat</AssemblyName>
+    <AssemblyName>SlonobassAgent</AssemblyName>
     <RootNamespace>OpenCodeChat</RootNamespace>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>

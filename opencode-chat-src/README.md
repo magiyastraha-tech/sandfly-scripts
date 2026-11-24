@@ -1,7 +1,9 @@
-# OpenCode — чат (исходники)
+# Slonobass agent — исходники
 
 Портативная программа чата для Windows вокруг движка opencode.
 Один файл кода: `chat.cs` — C# 5, WinForms, .NET Framework 4.8.
+
+Раньше программа называлась OpenCode Chat.
 
 ## Как собрать
 
@@ -10,20 +12,38 @@
 
     dotnet build -c Release
 
-Готовый файл появится в `bin/Release/chat.exe`.
-Переименуйте его в `OpenCode-Chat.exe` и положите рядом с папками
-`engine` и `projects` из релиза — программа ищет движок относительно
-своего расположения.
+Готовый файл появится в `bin/Release/SlonobassAgent.exe`.
+Переименуйте его в `Slonobass-Agent.exe`, положите рядом `.exe.config`
+и папки `engine` и `projects` из релиза — программа ищет движок
+относительно своего расположения.
+
+Сборка на Linux без .NET Framework:
+
+    export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
+    dotnet build -c Release
 
 ## Что уже лежит в релизе
 
 Готовые сборки: https://github.com/magiyastraha-tech/sandfly-scripts/releases
-Тег `opencode-chat-N` — версия N. В ZIP уже есть движок opencode,
+Тег `slonobass-agent-N` — версия N. В ZIP уже есть движок opencode,
 llama.cpp для офлайн-моделей GGUF и инструкция для пользователя.
 
 ## Устройство
 
 - `chat.cs` — всё окно, переписка, отправка запросов движку, офлайн-модели.
-- `OpenCodeChat.csproj` — проект сборки (net48).
-- Ключ DeepSeek не хранится в коде: он вводится в окне «Мой профиль» и
-  лежит на компьютере пользователя в зашифрованном виде (DPAPI).
+- `SlonobassAgent.csproj` — проект сборки (net48).
+- Ключи провайдеров не хранятся в коде: ключ вводится в окне «Мой профиль»
+  и лежит на компьютере пользователя в зашифрованном виде (DPAPI).
+
+## Провайдеры
+
+В `projects/opencode.json` можно добавить любой OpenAI-совместимый сервис:
+
+- Polza.ai — `https://polza.ai/api/v1`, ключ `pza_…`, модели вида `vendor/model`;
+- AnyModel — `https://anymodel.org/v1`, один ключ на GPT, Claude, Gemini, DeepSeek.
+
+## Управление перепиской
+
+- Стрелки вверх и вниз — по целым сообщениям.
+- Ctrl со стрелками — по первым сообщениям каждого собеседника.
+- Ctrl+Enter — открыть ссылку из сообщения.

@@ -5,8 +5,10 @@ using System.Drawing;
 using System.IO;
 using System.Media;
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -79,6 +81,24 @@ namespace OpenCodeChat
         private string sessionId = null;
         private DateTime startedAt = DateTime.Now;
         private bool busy = false;
+
+        // «Стоп»: пока движок отвечает, здесь лежит его процесс.
+        private Button stopBtn;
+        private Button copyBtn;
+        private Process activeProc;
+        private volatile bool stopRequested;
+        private string lastAnswer = "";
+
+        // Озвучка: скрытая метка с ролью «предупреждение» — экранный диктор
+        // читает её текст целиком, как только он меняется.
+        private Label announcer;
+        private System.Windows.Forms.Timer announceTimer;
+        private string pendingAnnounce = "";
+
+        // Границы сообщений в переписке и кэш, чтобы не пересчитывать зря.
+        private List<int[]> blocks = new List<int[]>();
+        private List<string> blocksAuthors = new List<string>();
+        private string blocksText = null;
 
         private readonly string historyRtf;
         private readonly string historyState;
@@ -160,8 +180,9 @@ namespace OpenCodeChat
 
         private void BuildUi()
         {
-            Text = "OpenCode — чат";
+            Text = "Slonobass agent";
             StartPosition = FormStartPosition.CenterScreen;
+            KeyPreview = true;
             ClientSize = new Size(980, 740);
             MinimumSize = new Size(760, 560);
             Font = new Font("Segoe UI", 10f);
@@ -252,10 +273,11 @@ namespace OpenCodeChat
             transcript.BackColor = Color.White;
             transcript.ForeColor = Color.Black;
             transcript.HideSelection = false;
-            transcript.DetectUrls = false;
+            transcript.DetectUrls = true;
             transcript.ShortcutsEnabled = true;
             transcript.AccessibleName = "Переписка";
             transcript.KeyDown += TranscriptKeyDown;
+            transcript.LinkClicked += delegate(object s2, LinkClickedEventArgs le) { OpenLink(le.LinkText); };
             main.Controls.Add(transcript, 0, 1);
 
             // --- attach state (row 2) ---
@@ -294,6 +316,25 @@ namespace OpenCodeChat
             detachBtn.Click += delegate { ClearPending(); };
             buttons.Controls.Add(detachBtn);
 
+            stopBtn = new Button();
+            stopBtn.Text = "&Стоп";
+            stopBtn.Width = 140;
+            stopBtn.Height = 28;
+            stopBtn.AccessibleName = "Остановить ответ";
+            stopBtn.AccessibleDescription = "Обрывает ответ модели; написанное остаётся в переписке";
+            stopBtn.Enabled = false;
+            stopBtn.Click += delegate { StopAgent(); };
+            buttons.Controls.Add(stopBtn);
+
+            copyBtn = new Button();
+            copyBtn.Text = "&Копировать ответ";
+            copyBtn.Width = 200;
+            copyBtn.Height = 28;
+            copyBtn.AccessibleName = "Копировать последний ответ";
+            copyBtn.AccessibleDescription = "Кладёт последний ответ модели в буфер обмена";
+            copyBtn.Click += delegate { CopyLastAnswer(); };
+            buttons.Controls.Add(copyBtn);
+
             main.Controls.Add(buttons, 0, 4);
 
             // --- files panel (row 5) ---
@@ -330,7 +371,35 @@ namespace OpenCodeChat
             statusLabel.AccessibleName = "Состояние";
             main.Controls.Add(statusLabel, 0, 6);
 
+            // Скрытая метка для озвучки ответов целиком.
+            announcer = new Label();
+            announcer.AutoSize = false;
+            announcer.Size = new Size(1, 1);
+            announcer.Location = new Point(-3000, -3000);
+            announcer.AccessibleRole = AccessibleRole.Alert;
+            announcer.AccessibleName = "Оповещение";
+            Controls.Add(announcer);
+
+            announceTimer = new System.Windows.Forms.Timer();
+            announceTimer.Interval = 450;
+            announceTimer.Tick += delegate
+            {
+                announceTimer.Stop();
+                if (pendingAnnounce.Length == 0) return;
+                announcer.AccessibleName = pendingAnnounce;
+                announcer.Text = pendingAnnounce;
+                try
+                {
+                    NotifyWinEvent(0x800C, announcer.Handle, -4, 0);
+                    NotifyWinEvent(0x0002, announcer.Handle, -4, 0);
+                }
+                catch
+                {
+                }
+            };
+
             Controls.Add(main);
+            KeyPress += FormKeyPress;
 
             tick = new System.Windows.Forms.Timer();
             tick.Interval = 1000;
@@ -340,7 +409,7 @@ namespace OpenCodeChat
                 if (loadingOffline)
                     statusLabel.Text = "Загружаю офлайн-модель… " + elapsed.ToString() + " с";
                 else
-                    statusLabel.Text = "OpenCode отвечает… " + elapsed.ToString() + " с";
+                    statusLabel.Text = "Агент отвечает… " + elapsed.ToString() + " с";
             };
         }
 
@@ -363,8 +432,8 @@ namespace OpenCodeChat
             {
                 Log.Write("ERROR", "Не найден движок: " + exePath);
                 MessageBox.Show(this,
-                    "Не найден движок engine\\opencode.exe.\r\nРаспакуйте архив целиком в одну папку и запускайте OpenCode-Chat.exe из неё.",
-                    "OpenCode — чат", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    "Не найден движок engine\\opencode.exe.\r\nРаспакуйте архив целиком в одну папку и запускайте Slonobass-Agent.exe из неё.",
+                    "Slonobass agent", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 Close();
                 return;
             }
@@ -380,8 +449,8 @@ namespace OpenCodeChat
             if (busy)
             {
                 DialogResult r = MessageBox.Show(this,
-                    "OpenCode ещё отвечает. Закрыть окно?",
-                    "OpenCode — чат", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                    "Агент ещё отвечает. Закрыть окно?",
+                    "Slonobass agent", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
                 if (r != DialogResult.Yes) e.Cancel = true;
             }
             if (!e.Cancel)
@@ -526,6 +595,7 @@ namespace OpenCodeChat
             transcript.SelectionFont = bodyFont;
             transcript.SelectionColor = Color.Black;
             transcript.AppendText(body + "\r\n\r\n");
+            blocksText = null;
             SaveHistory();
         }
 
@@ -548,11 +618,214 @@ namespace OpenCodeChat
             Send();
         }
 
+        // Набор текста в любом месте программы уводит фокус в редактор.
+        private void FormKeyPress(object sender, KeyPressEventArgs e)
+        {
+            char c = e.KeyChar;
+            Control a = ActiveControl;
+            if (a == input) return;
+            // В редакторе переписки текст не набирается — уводим его в поле ввода.
+            if (a != null && a is TextBox && !((TextBox)a).ReadOnly) return;
+            if (modelBox != null && a == modelBox && modelBox.DroppedDown) return;
+            if (c == '\b')
+            {
+                input.Focus();
+                if (input.SelectionLength > 0) input.SelectedText = "";
+                else if (input.SelectionStart > 0)
+                {
+                    int pos = input.SelectionStart;
+                    input.Text = input.Text.Remove(pos - 1, 1);
+                    input.SelectionStart = pos - 1;
+                }
+                e.Handled = true;
+                return;
+            }
+            if (c == ' ' && a is ButtonBase) return;
+            if (c >= ' ' && c != '\x7f')
+            {
+                input.Focus();
+                input.SelectedText = c.ToString();
+                e.Handled = true;
+            }
+        }
+
+        // ---------- озвучка и переходы по сообщениям ----------
+
+        private void Announce(string text)
+        {
+            if (text == null) return;
+            text = text.Trim();
+            if (text.Length == 0) return;
+            if (text.Length > 8000) text = text.Substring(0, 8000) + " …";
+            pendingAnnounce = text;
+            announceTimer.Stop();
+            announceTimer.Start();
+        }
+
+        // Каждое сообщение начинается со строки «Имя, 12:34» и тянется
+        // до следующей такой строки. Заголовок «Разговор начат» сюда не входит.
+        private List<int[]> MessageRanges()
+        {
+            string t = transcript.Text;
+            if (blocksText == t) return blocks;
+            List<int> starts = new List<int>();
+            List<string> authors = new List<string>();
+            int pos = 0;
+            while (pos <= t.Length)
+            {
+                int end = t.IndexOf("\n", pos, StringComparison.Ordinal);
+                if (end < 0) end = t.Length;
+                int lineEnd = end;
+                if (lineEnd > pos && t[lineEnd - 1] == '\r') lineEnd--;
+                string line = t.Substring(pos, lineEnd - pos);
+                Match m = Regex.Match(line, @"^(.+?), (\d{1,2}:\d{2})$");
+                if (m.Success && pos > 0)
+                {
+                    starts.Add(pos);
+                    string who = m.Groups[1].Value;
+                    int dot = who.IndexOf(" · ", StringComparison.Ordinal);
+                    if (dot > 0) who = who.Substring(0, dot);
+                    authors.Add(who);
+                }
+                if (end >= t.Length) break;
+                pos = end + 1;
+            }
+            List<int[]> list = new List<int[]>();
+            for (int i = 0; i < starts.Count; i++)
+            {
+                int from = starts[i];
+                int to = i + 1 < starts.Count ? starts[i + 1] : t.Length;
+                while (to > from && IsBlankChar(t[to - 1])) to--;
+                list.Add(new int[] { from, to });
+            }
+            blocks = list;
+            blocksAuthors = authors;
+            blocksText = t;
+            return list;
+        }
+
+        private void SelectBlock(int[] range)
+        {
+            transcript.SelectionStart = range[0];
+            transcript.SelectionLength = range[1] - range[0];
+            transcript.ScrollToCaret();
+            Announce(transcript.Text.Substring(range[0], range[1] - range[0]));
+        }
+
+        // Номер сообщения, в котором стоит курсор. После выделения блока
+        // курсор стоит на его начале, поэтому «текущее» — последнее уже
+        // начавшееся сообщение: иначе стрелки залипали на одном блоке.
+        private static int BlockAt(List<int[]> list, int caret)
+        {
+            int idx = 0;
+            for (int i = 0; i < list.Count; i++)
+                if (list[i][0] <= caret) idx = i;
+            return idx;
+        }
+
+        private void MoveBetweenBlocks(int dir)
+        {
+            List<int[]> list = MessageRanges();
+            if (list.Count == 0) return;
+            int idx = BlockAt(list, transcript.SelectionStart) + dir;
+            if (idx < 0) idx = 0;
+            if (idx >= list.Count) idx = list.Count - 1;
+            SelectBlock(list[idx]);
+        }
+
+        private void MoveBetweenSpeakers(int dir)
+        {
+            List<int[]> list = MessageRanges();
+            if (list.Count == 0) return;
+            List<int> firsts = new List<int>();
+            for (int i = 0; i < list.Count; i++)
+            {
+                if (i == 0 || !string.Equals(blocksAuthors[i], blocksAuthors[i - 1], StringComparison.Ordinal))
+                    firsts.Add(i);
+            }
+            int cur = BlockAt(list, transcript.SelectionStart);
+            int g = 0;
+            for (int i = 0; i < firsts.Count; i++)
+            {
+                if (firsts[i] <= cur) g = i;
+            }
+            if (dir > 0)
+            {
+                if (g >= firsts.Count - 1) return;
+                g++;
+            }
+            else
+            {
+                if (cur > firsts[g]) { /* сначала к первому сообщению этого собеседника */ }
+                else if (g > 0) g--;
+                else return;
+            }
+            SelectBlock(list[firsts[g]]);
+        }
+
+        private static bool IsWebLink(string url)
+        {
+            return url.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                || url.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private void OpenLink(string url)
+        {
+            if (url == null) return;
+            url = url.Trim().TrimEnd('.', ',', ';', ':', ')', ']', '}', '»', '"', '\'');
+            if (!IsWebLink(url)) return;
+            try
+            {
+                Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+                statusLabel.Text = "Открываю ссылку: " + url;
+            }
+            catch (Exception ex)
+            {
+                Log.Exception("Открыть ссылку", ex);
+                statusLabel.Text = "Не удалось открыть ссылку: " + ex.Message;
+            }
+        }
+
+        private void OpenLinkAtCaret()
+        {
+            string t = transcript.Text;
+            int caret = transcript.SelectionStart;
+            if (caret < 0) caret = 0;
+            if (caret > t.Length) caret = t.Length;
+            int lineStart = caret > 0 ? t.LastIndexOf('\n', caret - 1) + 1 : 0;
+            int lineEnd = t.IndexOf('\n', caret);
+            if (lineEnd < 0) lineEnd = t.Length;
+            Match m = Regex.Match(t.Substring(lineStart, lineEnd - lineStart), @"https?://[^\s<>""']+");
+            if (!m.Success)
+            {
+                List<int[]> list = MessageRanges();
+                for (int i = 0; i < list.Count; i++)
+                {
+                    if (caret >= list[i][0] && caret <= list[i][1])
+                    {
+                        m = Regex.Match(t.Substring(list[i][0], list[i][1] - list[i][0]), @"https?://[^\s<>""']+");
+                        break;
+                    }
+                }
+            }
+            if (m.Success) OpenLink(m.Value);
+            else statusLabel.Text = "В этом сообщении нет ссылки.";
+        }
+
+        [DllImport("user32.dll")]
+        private static extern void NotifyWinEvent(int winEvent, IntPtr hwnd, int objectType, int objectId);
+
         // ---------- hotkeys ----------
 
         private void FormKeyDown(object sender, KeyEventArgs e)
         {
-            if (e.KeyCode == Keys.F1)
+            if (e.KeyCode == Keys.Escape && busy)
+            {
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                StopAgent();
+            }
+            else if (e.KeyCode == Keys.F1)
             {
                 e.Handled = true;
                 e.SuppressKeyPress = true;
@@ -643,8 +916,29 @@ namespace OpenCodeChat
 
         private void TranscriptKeyDown(object sender, KeyEventArgs e)
         {
-            if (e.Control || e.Shift || e.Alt) return;
-            if (e.KeyCode == Keys.Home)
+            if (e.Shift || e.Alt) return;
+            if (e.Control && (e.KeyCode == Keys.Up || e.KeyCode == Keys.Down))
+            {
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                MoveBetweenSpeakers(e.KeyCode == Keys.Down ? 1 : -1);
+                return;
+            }
+            if (e.Control && e.KeyCode == Keys.Enter)
+            {
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                OpenLinkAtCaret();
+                return;
+            }
+            if (e.Control) return;
+            if (e.KeyCode == Keys.Up || e.KeyCode == Keys.Down)
+            {
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                MoveBetweenBlocks(e.KeyCode == Keys.Down ? 1 : -1);
+            }
+            else if (e.KeyCode == Keys.Home)
             {
                 e.Handled = true;
                 e.SuppressKeyPress = true;
@@ -666,7 +960,7 @@ namespace OpenCodeChat
         {
             if (busy)
             {
-                statusLabel.Text = "OpenCode ещё отвечает. Подождите.";
+                statusLabel.Text = "Агент ещё отвечает. Подождите.";
                 return;
             }
             string text = input.Text.Trim();
@@ -691,7 +985,7 @@ namespace OpenCodeChat
                 MessageBox.Show(this,
                     "В списке выбрана офлайн-модель, но её файл не найден.\r\n"
                     + "Нажмите F3, выберите строку «Офлайн — имя файла» или добавьте файл кнопкой «Добавить модель…».",
-                    "OpenCode — чат", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    "Slonobass agent", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 input.Focus();
                 return;
             }
@@ -702,7 +996,7 @@ namespace OpenCodeChat
                 MessageBox.Show(this,
                     "Выбрана модель из раздела «Мой профиль», но ключ DeepSeek ещё не подключён.\r\n"
                     + "Нажмите кнопку «Мой профиль…» и вставьте свой ключ, либо выберите бесплатную модель.",
-                    "OpenCode — чат", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    "Slonobass agent", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
@@ -740,10 +1034,18 @@ namespace OpenCodeChat
             transcript.SelectionStart = transcript.TextLength;
             transcript.SelectionLength = 0;
             transcript.ScrollToCaret();
+            Sounds.Outgoing();
+
+            if (gguf != null)
+            {
+                int ctx = ContextFor(gguf);
+                WriteOfflineConfig(ctx);
+                Log.Write("OFFLINE", "Модель " + Path.GetFileName(gguf) + ": контекст " + ctx.ToString() + " токенов.");
+            }
 
             input.Text = "";
             SetBusy(true);
-            statusLabel.Text = "OpenCode отвечает… 0 с";
+            statusLabel.Text = "Агент отвечает… 0 с";
             elapsed = 0;
             tick.Start();
 
@@ -796,6 +1098,7 @@ namespace OpenCodeChat
 
         private void RunAgent(string question, string model, List<FileItem> files, Dictionary<string, string> before)
         {
+            stopRequested = false;
             StringBuilder sb = new StringBuilder();
             StringBuilder eb = new StringBuilder();
             string localSid = null;
@@ -840,6 +1143,7 @@ namespace OpenCodeChat
                             }
                         };
                         p.Start();
+                        activeProc = p;
                         p.BeginErrorReadLine();
 
                         string line;
@@ -895,9 +1199,14 @@ namespace OpenCodeChat
                     lock (eb) { eb.AppendLine(ex.Message); }
                     Log.Exception("Запуск движка", ex);
                 }
+                finally
+                {
+                    activeProc = null;
+                }
 
                 string attemptErrors;
                 lock (eb) { attemptErrors = eb.ToString(); }
+                if (stopRequested) break;
                 if (useSession && attemptErrors.IndexOf("Location not found", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     // Сессия движка привязана к папке projects. Если программа
@@ -943,6 +1252,8 @@ namespace OpenCodeChat
         {
             tick.Stop();
             loadingOffline = false;
+            bool wasStopped = stopRequested;
+            stopRequested = false;
             SetBusy(false);
             if (sessionId == null && sid != null) sessionId = sid;
 
@@ -950,8 +1261,8 @@ namespace OpenCodeChat
             string answerText = answer.Trim();
             if (answerText.Length == 0)
             {
-                answerText = "(ответа нет)";
-                if (exit != 0)
+                answerText = wasStopped ? "(ответ остановлен)" : "(ответа нет)";
+                if (exit != 0 && !wasStopped)
                 {
                     answerText = "Не получилось получить ответ.";
                 }
@@ -960,9 +1271,14 @@ namespace OpenCodeChat
                     answerText += "\r\nПодробности: " + Shorten(errors.Trim(), 1200);
                 }
             }
+            else if (wasStopped)
+            {
+                answerText += "\r\n\r\n(остановлено вручную)";
+            }
+            lastAnswer = answerText;
 
             int start = transcript.TextLength;
-            string who = "OpenCode";
+            string who = "Slonobass agent";
             if (model.Length > 0)
             {
                 int slash = model.IndexOf('/');
@@ -988,12 +1304,23 @@ namespace OpenCodeChat
             {
                 statusLabel.Text = "Готово.";
             }
+            if (wasStopped)
+            {
+                statusLabel.Text = "Остановлено. Что успело прийти — в переписке.";
+            }
 
-            transcript.SelectionStart = FirstText(start);
-            transcript.SelectionLength = 0;
+            // Выделяем ответ целиком: диктор читает его одним блоком,
+            // а не по кускам вокруг каретки.
+            string full = transcript.Text;
+            int answerStart = FirstText(start);
+            int answerEnd = full.Length;
+            while (answerEnd > answerStart && IsBlankChar(full[answerEnd - 1])) answerEnd--;
+            transcript.SelectionStart = answerStart;
+            transcript.SelectionLength = Math.Max(0, answerEnd - answerStart);
             transcript.ScrollToCaret();
             transcript.Focus();
-            try { SystemSounds.Asterisk.Play(); } catch { }
+            Sounds.Incoming();
+            Announce((wasStopped ? "Ответ остановлен. " : "Новый ответ. ") + answerText);
         }
 
         private void SetBusy(bool value)
@@ -1001,8 +1328,60 @@ namespace OpenCodeChat
             busy = value;
             detachBtn.Enabled = !value && pending.Count > 0;
             newChatBtn.Enabled = !value;
+            if (stopBtn != null) stopBtn.Enabled = value;
             // Выбор модели не отключаем: отключённый элемент экранный диктор
             // пропускает, и кажется, что список моделей исчез.
+        }
+
+        private void StopAgent()
+        {
+            if (!busy)
+            {
+                statusLabel.Text = "Сейчас ничего не происходит.";
+                return;
+            }
+            stopRequested = true;
+            statusLabel.Text = "Останавливаю ответ…";
+            Process p = activeProc;
+            if (p == null) return;
+            try
+            {
+                // Движок может запускать дочерние процессы — гасим всё дерево.
+                ProcessStartInfo kill = new ProcessStartInfo("taskkill", "/PID " + p.Id.ToString() + " /T /F");
+                kill.UseShellExecute = false;
+                kill.CreateNoWindow = true;
+                Process.Start(kill);
+            }
+            catch (Exception ex)
+            {
+                Log.Exception("Остановка ответа", ex);
+            }
+            try
+            {
+                if (!p.HasExited) p.Kill();
+            }
+            catch
+            {
+            }
+        }
+
+        private void CopyLastAnswer()
+        {
+            if (lastAnswer.Length == 0)
+            {
+                statusLabel.Text = "Копировать нечего: ответов пока нет.";
+                return;
+            }
+            try
+            {
+                Clipboard.SetText(lastAnswer);
+                statusLabel.Text = "Последний ответ скопирован в буфер обмена.";
+            }
+            catch (Exception ex)
+            {
+                Log.Exception("Копирование ответа", ex);
+                statusLabel.Text = "Не удалось скопировать: " + ex.Message;
+            }
         }
 
         // ---------- attachments ----------
@@ -1193,7 +1572,7 @@ namespace OpenCodeChat
                 File.Copy(item.Path, dest, false);
                 Log.Write("SAVE", item.Path + " -> " + dest);
                 statusLabel.Text = "Сохранено в Загрузки: " + Path.GetFileName(dest);
-                try { SystemSounds.Asterisk.Play(); } catch { }
+                Sounds.Saved();
             }
             catch (Exception ex)
             {
@@ -1520,8 +1899,52 @@ namespace OpenCodeChat
             }
         }
 
-        private void WriteOfflineConfig()
+        private static readonly Dictionary<string, int> ctxCache = new Dictionary<string, int>();
+
+        // Сколько токенов контекста дать модели: берём из её метаданных,
+        // ограничиваем обученным контекстом и свободной памятью.
+        private static int ContextFor(string gguf)
         {
+            lock (ctxCache)
+            {
+                int known;
+                if (ctxCache.TryGetValue(gguf, out known)) return known;
+            }
+            int ctx = 8192;
+            int train;
+            long kvPerToken;
+            if (Gguf.TryRead(gguf, out train, out kvPerToken))
+            {
+                long fileSize = 0;
+                try { fileSize = new FileInfo(gguf).Length; } catch { }
+                long ram = Gguf.TotalRamBytes();
+                long budget = ram / 2 - fileSize;
+                if (budget < 512L * 1024 * 1024) budget = 512L * 1024 * 1024;
+                long byRam = kvPerToken > 0 ? budget / kvPerToken : 32768;
+                int[] steps = new int[] { 2048, 4096, 8192, 16384, 32768, 65536, 131072 };
+                ctx = 2048;
+                for (int i = 0; i < steps.Length; i++)
+                {
+                    if (steps[i] <= train && steps[i] <= byRam) ctx = steps[i];
+                }
+                Log.Write("OFFLINE", "Метаданные " + Path.GetFileName(gguf)
+                    + ": обученный контекст " + train.ToString()
+                    + ", кэш " + (kvPerToken / 1024).ToString() + " КБ на 1000 токенов"
+                    + ", оперативной памяти " + (ram / (1024L * 1024L)).ToString() + " МБ"
+                    + ", выбран контекст " + ctx.ToString());
+            }
+            else
+            {
+                Log.Write("OFFLINE", "Метаданные GGUF прочитать не удалось — беру осторожные 8192 токена: " + gguf);
+            }
+            lock (ctxCache) { ctxCache[gguf] = ctx; }
+            return ctx;
+        }
+
+        private void WriteOfflineConfig(int ctx = 8192)
+        {
+            int limitCtx = Math.Max(1024, ctx - 1024);
+            int output = Math.Min(4096, Math.Max(1024, limitCtx / 2));
             try
             {
                 string path = Path.Combine(projectsDir, "opencode.json");
@@ -1541,7 +1964,7 @@ namespace OpenCodeChat
                 sb.AppendLine("          \"id\": \"local\",");
                 sb.AppendLine("          \"name\": \"Локальная модель\",");
                 sb.AppendLine("          \"tool_call\": true,");
-                sb.AppendLine("          \"limit\": { \"context\": 16384, \"output\": 1024 }");
+                sb.AppendLine("          \"limit\": { \"context\": " + limitCtx.ToString() + ", \"output\": " + output.ToString() + " }");
                 sb.AppendLine("        }");
                 sb.AppendLine("      }");
                 sb.AppendLine("    }");
@@ -1574,6 +1997,39 @@ namespace OpenCodeChat
             {
                 return false;
             }
+        }
+
+        private static string HttpGetText(string url)
+        {
+            HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
+            req.Proxy = null;
+            req.Timeout = 3000;
+            req.ReadWriteTimeout = 3000;
+            req.KeepAlive = false;
+            using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
+            using (StreamReader reader = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
+            {
+                return reader.ReadToEnd();
+            }
+        }
+
+        // llama-server отдаёт в /props контекст одного слота (n_ctx).
+        private int OfflineSlotContext()
+        {
+            try
+            {
+                string body = HttpGetText("http://127.0.0.1:" + OfflinePort.ToString() + "/props");
+                Match m = Regex.Match(body, "\"n_ctx\"\\s*:\\s*(\\d+)");
+                if (m.Success)
+                {
+                    int v;
+                    if (int.TryParse(m.Groups[1].Value, out v) && v > 0 && v <= 1048576) return v;
+                }
+            }
+            catch
+            {
+            }
+            return 0;
         }
 
         private bool OfflineReady()
@@ -1644,7 +2100,12 @@ namespace OpenCodeChat
                     StopOfflineLocked();
                 }
             }
-            if (alive && OfflineReady()) return true;
+            if (alive && OfflineReady())
+            {
+                int running = OfflineSlotContext();
+                if (running > 0) WriteOfflineConfig(Math.Min(ContextFor(gguf), running));
+                return true;
+            }
             if (alive)
             {
                 // Процесс жив, но сервер не отвечает — начинаем заново.
@@ -1659,11 +2120,13 @@ namespace OpenCodeChat
                 return false;
             }
 
-            SetStatusSafe("Запускаю офлайн-модель…");
+            int ctx = ContextFor(gguf);
+            SetStatusSafe("Запускаю офлайн-модель, контекст " + ctx.ToString() + " токенов…");
+            Log.Write("OFFLINE", "Запуск llama-server: контекст " + ctx.ToString() + " токенов, файл " + gguf);
             ProcessStartInfo psi = new ProcessStartInfo(exe);
             psi.Arguments = "-m " + Quote(gguf)
                 + " --host 127.0.0.1 --port " + OfflinePort.ToString()
-                + " -c 16384 --parallel 1 --alias local --jinja";
+                + " -c " + ctx.ToString() + " --parallel 1 -np 1 --alias local --jinja";
             psi.WorkingDirectory = llamaDir;
             psi.UseShellExecute = false;
             psi.CreateNoWindow = true;
@@ -1723,7 +2186,15 @@ namespace OpenCodeChat
                 if (OfflineReady())
                 {
                     loadingOffline = false;
-                    SetStatusSafe("Офлайн-модель готова, отправляю запрос…");
+                    // Сервер мог разделить контекст между слотами: движку
+                    // сообщаем реально доступный размер, иначе он ошибётся
+                    // «request exceeds the available context size».
+                    int slotCtx = OfflineSlotContext();
+                    int useCtx = slotCtx > 0 && slotCtx < ctx ? slotCtx : ctx;
+                    WriteOfflineConfig(useCtx);
+                    Log.Write("OFFLINE", "Контекст слота: " + slotCtx.ToString()
+                        + "; движку выставлен " + useCtx.ToString() + ".");
+                    SetStatusSafe("Офлайн-модель готова (контекст " + useCtx.ToString() + "), отправляю запрос…");
                     Log.Write("OFFLINE", "Сервер llama готов после " + waited.ToString() + " с.");
                     return true;
                 }
@@ -2212,6 +2683,255 @@ namespace OpenCodeChat
         }
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct MemoryStatusEx
+    {
+        public uint dwLength;
+        public uint dwMemoryLoad;
+        public ulong ullTotalPhys;
+        public ulong ullAvailPhys;
+        public ulong ullTotalPageFile;
+        public ulong ullAvailPageFile;
+        public ulong ullTotalVirtual;
+        public ulong ullAvailVirtual;
+        public ulong ullAvailExtendedVirtual;
+    }
+
+    // Чтение метаданных GGUF: обученный контекст и размер KV-кэша на токен.
+    internal static class Gguf
+    {
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GlobalMemoryStatusEx(ref MemoryStatusEx status);
+
+        public static long TotalRamBytes()
+        {
+            try
+            {
+                MemoryStatusEx m = new MemoryStatusEx();
+                m.dwLength = (uint)Marshal.SizeOf(typeof(MemoryStatusEx));
+                if (GlobalMemoryStatusEx(ref m)) return (long)m.ullTotalPhys;
+            }
+            catch
+            {
+            }
+            return 8L * 1024 * 1024 * 1024;
+        }
+
+        private static bool IsIntType(uint t)
+        {
+            return t == 0 || t == 1 || t == 2 || t == 3 || t == 4 || t == 5 || t == 10 || t == 11;
+        }
+
+        private static uint ReadUint(BinaryReader br, uint type)
+        {
+            switch (type)
+            {
+                case 0: return br.ReadByte();
+                case 1: return (uint)(byte)br.ReadSByte();
+                case 2: return br.ReadUInt16();
+                case 3: return (uint)(ushort)br.ReadInt16();
+                case 4: return br.ReadUInt32();
+                case 5: return (uint)br.ReadInt32();
+                case 10: { ulong v = br.ReadUInt64(); return v > uint.MaxValue ? uint.MaxValue : (uint)v; }
+                case 11: { long v2 = br.ReadInt64(); return v2 < 0 ? 0 : (v2 > uint.MaxValue ? uint.MaxValue : (uint)v2); }
+                default: throw new InvalidDataException("не целое");
+            }
+        }
+
+        private static void Skip(BinaryReader br, uint type)
+        {
+            switch (type)
+            {
+                case 0: case 1: case 7: br.ReadByte(); return;
+                case 2: case 3: br.ReadUInt16(); return;
+                case 4: case 5: case 6: br.ReadUInt32(); return;
+                case 10: case 11: case 12: br.ReadUInt64(); return;
+                case 8:
+                    {
+                        ulong len = br.ReadUInt64();
+                        if (len > 16UL * 1024UL * 1024UL) throw new InvalidDataException("строка");
+                        br.BaseStream.Seek((long)len, SeekOrigin.Current);
+                        return;
+                    }
+                case 9:
+                    {
+                        uint et = br.ReadUInt32();
+                        ulong n = br.ReadUInt64();
+                        if (n > 100000000UL) throw new InvalidDataException("массив");
+                        for (ulong i = 0; i < n; i++) Skip(br, et);
+                        return;
+                    }
+                default: throw new InvalidDataException("тип " + type.ToString());
+            }
+        }
+
+        private static string ReadString(BinaryReader br)
+        {
+            ulong len = br.ReadUInt64();
+            if (len > 1024UL * 1024UL) throw new InvalidDataException("ключ");
+            byte[] b = br.ReadBytes((int)len);
+            if (b.Length != (int)len) throw new EndOfStreamException();
+            return Encoding.UTF8.GetString(b);
+        }
+
+        public static bool TryRead(string path, out int trainContext, out long kvBytesPerToken)
+        {
+            trainContext = 0;
+            kvBytesPerToken = 0;
+            try
+            {
+                using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+                using (BinaryReader br = new BinaryReader(fs))
+                {
+                    if (br.ReadUInt32() != 0x46554747) return false;
+                    uint version = br.ReadUInt32();
+                    if (version < 2 || version > 3) return false;
+                    br.ReadUInt64();
+                    ulong count = br.ReadUInt64();
+                    if (count == 0 || count > 1000000UL) return false;
+
+                    uint train = 0, blocks = 0, heads = 0, embed = 0, keyLen = 0;
+                    uint[] kvHeads = null;
+
+                    for (ulong i = 0; i < count; i++)
+                    {
+                        if (train > 0 && blocks > 0 && kvHeads != null && (keyLen > 0 || embed > 0)) break;
+                        string key = ReadString(br);
+                        uint type = br.ReadUInt32();
+                        bool isInt = IsIntType(type);
+                        if (isInt && key.EndsWith(".context_length", StringComparison.Ordinal)) { train = ReadUint(br, type); continue; }
+                        if (isInt && key.EndsWith(".block_count", StringComparison.Ordinal)) { blocks = ReadUint(br, type); continue; }
+                        if (isInt && key.EndsWith(".attention.head_count", StringComparison.Ordinal)) { heads = ReadUint(br, type); continue; }
+                        if (isInt && key.EndsWith(".attention.key_length", StringComparison.Ordinal)) { keyLen = ReadUint(br, type); continue; }
+                        if (isInt && key.EndsWith(".embedding_length", StringComparison.Ordinal)) { embed = ReadUint(br, type); continue; }
+                        if (key.EndsWith(".attention.head_count_kv", StringComparison.Ordinal))
+                        {
+                            if (isInt)
+                            {
+                                kvHeads = new uint[] { ReadUint(br, type) };
+                                continue;
+                            }
+                            if (type == 9)
+                            {
+                                uint et = br.ReadUInt32();
+                                ulong n = br.ReadUInt64();
+                                if (IsIntType(et) && n > 0 && n < 4096)
+                                {
+                                    kvHeads = new uint[(int)n];
+                                    for (ulong k = 0; k < n; k++) kvHeads[k] = ReadUint(br, et);
+                                    continue;
+                                }
+                                if (n > 100000000UL) return false;
+                                for (ulong k = 0; k < n; k++) Skip(br, et);
+                                continue;
+                            }
+                        }
+                        Skip(br, type);
+                    }
+
+                    if (train == 0 || blocks == 0) return false;
+                    if (heads == 0 && embed > 0 && keyLen > 0) heads = embed / keyLen;
+                    long kvTotal = 0;
+                    if (kvHeads != null)
+                    {
+                        for (int i = 0; i < kvHeads.Length; i++) kvTotal += kvHeads[i];
+                    }
+                    else
+                    {
+                        kvTotal = heads;
+                    }
+                    long headDim = keyLen;
+                    if (headDim == 0 && heads > 0 && embed > 0) headDim = embed / heads;
+                    if (kvTotal <= 0 || headDim <= 0) return false;
+                    trainContext = (int)Math.Min(train, 1048576u);
+                    // K и V, по 2 байта (fp16) на слой, голову и измерение.
+                    kvBytesPerToken = 2L * blocks * kvTotal * headDim * 2L;
+                    return true;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+    }
+
+    // Мягкие звуки интерфейса: приходящий ответ, отправка, сохранение.
+    internal static class Sounds
+    {
+        [DllImport("winmm.dll")]
+        private static extern bool PlaySound(byte[] sound, IntPtr module, uint flags);
+
+        private const uint SndAsync = 0x0001;
+        private const uint SndNoDefault = 0x0002;
+        private const uint SndMemory = 0x0004;
+
+        private static readonly byte[] incoming;
+        private static readonly byte[] outgoing;
+        private static readonly byte[] saved;
+
+        static Sounds()
+        {
+            int rate = 22050;
+            List<short> up = new List<short>();
+            Tone(up, rate, 587.0, 0.11, 0.16, 0.02);
+            Tone(up, rate, 880.0, 0.16, 0.13, 0.0);
+            incoming = Wav(up, rate);
+            List<short> down = new List<short>();
+            Tone(down, rate, 523.0, 0.09, 0.11, 0.0);
+            outgoing = Wav(down, rate);
+            List<short> ok = new List<short>();
+            Tone(ok, rate, 784.0, 0.08, 0.11, 0.0);
+            Tone(ok, rate, 1046.0, 0.10, 0.09, 0.0);
+            saved = Wav(ok, rate);
+        }
+
+        public static void Incoming() { Play(incoming); }
+        public static void Outgoing() { Play(outgoing); }
+        public static void Saved() { Play(saved); }
+
+        private static void Play(byte[] wav)
+        {
+            try { PlaySound(wav, IntPtr.Zero, SndMemory | SndAsync | SndNoDefault); }
+            catch
+            {
+            }
+        }
+
+        private static void Tone(List<short> buf, int rate, double freq, double seconds, double volume, double pause)
+        {
+            int n = (int)(rate * seconds);
+            for (int i = 0; i < n; i++)
+            {
+                double t = (double)i / n;
+                double env = Math.Min(1.0, t * 8.0) * Math.Min(1.0, (1.0 - t) * 4.0);
+                buf.Add((short)(Math.Sin(2.0 * Math.PI * freq * i / rate) * 32767.0 * volume * env));
+            }
+            int p = (int)(rate * pause);
+            for (int i = 0; i < p; i++) buf.Add(0);
+        }
+
+        private static byte[] Wav(List<short> samples, int rate)
+        {
+            int data = samples.Count * 2;
+            byte[] b = new byte[44 + data];
+            Encoding.ASCII.GetBytes("RIFF").CopyTo(b, 0);
+            BitConverter.GetBytes(36 + data).CopyTo(b, 4);
+            Encoding.ASCII.GetBytes("WAVEfmt ").CopyTo(b, 8);
+            BitConverter.GetBytes(16).CopyTo(b, 16);
+            BitConverter.GetBytes((short)1).CopyTo(b, 20);
+            BitConverter.GetBytes((short)1).CopyTo(b, 22);
+            BitConverter.GetBytes(rate).CopyTo(b, 24);
+            BitConverter.GetBytes(rate * 2).CopyTo(b, 28);
+            BitConverter.GetBytes((short)2).CopyTo(b, 32);
+            BitConverter.GetBytes((short)16).CopyTo(b, 34);
+            Encoding.ASCII.GetBytes("data").CopyTo(b, 36);
+            BitConverter.GetBytes(data).CopyTo(b, 40);
+            for (int i = 0; i < samples.Count; i++) BitConverter.GetBytes(samples[i]).CopyTo(b, 44 + i * 2);
+            return b;
+        }
+    }
+
     internal static class Program
     {
         [STAThread]
@@ -2249,7 +2969,7 @@ namespace OpenCodeChat
                     + (ex == null ? "" : "\r\n\r\n" + ex.Message)
                     + "\r\n\r\nЗапись сохранена в " + where
                     + ". Отправьте файл журнала разработчику.",
-                    "OpenCode — чат", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    "Slonobass agent", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             catch
             {
