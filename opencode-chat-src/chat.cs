@@ -51,15 +51,46 @@ namespace OpenCodeChat
         }
     }
 
+    // Одно сообщение переписки. Список показывает его на экране, а экранный
+    // диктор читает ToString() целиком — это и есть одно чтение на сообщение.
+    internal sealed class MessageItem
+    {
+        public string Header;
+        public string Body;
+        public Color HeaderColor;
+
+        public MessageItem(string header, string body, Color headerColor)
+        {
+            Header = header == null ? "" : header;
+            Body = body == null ? "" : body;
+            HeaderColor = headerColor;
+        }
+
+        public string Plain
+        {
+            get
+            {
+                if (Header.Length == 0) return Body;
+                if (Body.Length == 0) return Header;
+                return Header + "\r\n" + Body;
+            }
+        }
+
+        public override string ToString()
+        {
+            return Plain;
+        }
+    }
+
     internal sealed class ChatForm : Form
     {
         private readonly string root;
         private readonly string projectsDir;
         private readonly string exePath;
         private readonly string downloadsDir;
-        private readonly string userName = "Алёшка";
+        private readonly string userName = "Лия";
 
-        private RichTextBox transcript;
+        private ListBox transcript;
         private TextBox input;
         private Button detachBtn;
         private Button newChatBtn;
@@ -90,18 +121,13 @@ namespace OpenCodeChat
         private volatile bool stopRequested;
         private string lastAnswer = "";
 
-        // Озвучка: скрытая метка с ролью «предупреждение» — экранный диктор
-        // читает её текст целиком, как только он меняется.
-        private Label announcer;
-        private System.Windows.Forms.Timer announceTimer;
-        private string pendingAnnounce = "";
+        // Переписка — список сообщений: каждое сообщение отдельный пункт,
+        // экранный диктор читает его сам, когда на нём стоит выбор.
+        private readonly List<MessageItem> messages = new List<MessageItem>();
+        private System.Windows.Forms.Timer resizeTimer;
+        private int measuredWidth = -1;
 
-        // Границы сообщений в переписке и кэш, чтобы не пересчитывать зря.
-        private List<int[]> blocks = new List<int[]>();
-        private List<string> blocksAuthors = new List<string>();
-        private string blocksText = null;
-
-        private readonly string historyRtf;
+        private readonly string historyText;
         private readonly string historyState;
         private string preferredModel = "";
 
@@ -145,7 +171,7 @@ namespace OpenCodeChat
             downloadsDir = FindDownloads();
             string stateDir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "OpenCodeChat");
-            historyRtf = Path.Combine(stateDir, "chat.rtf");
+            historyText = Path.Combine(stateDir, "chat.txt");
             historyState = Path.Combine(stateDir, "chat.ini");
             modelsFile = Path.Combine(stateDir, "models.txt");
             llamaDir = Path.Combine(root, "engine", "llama");
@@ -273,20 +299,23 @@ namespace OpenCodeChat
             main.Controls.Add(header, 0, 0);
 
             // --- transcript ---
-            transcript = new RichTextBox();
+            // Список, а не текстовое поле: в списке каждое сообщение — отдельный
+            // пункт, стрелки переходят по пунктам, и диктор читает выбранное
+            // сообщение целиком сам. Никаких оповещений и выделений, которые
+            // перебивают друг друга.
+            transcript = new ListBox();
             transcript.Dock = DockStyle.Fill;
-            transcript.ReadOnly = true;
             transcript.BorderStyle = BorderStyle.FixedSingle;
-            transcript.WordWrap = true;
-            transcript.ScrollBars = RichTextBoxScrollBars.Vertical;
+            transcript.DrawMode = DrawMode.OwnerDrawVariable;
+            transcript.IntegralHeight = false;
+            transcript.SelectionMode = SelectionMode.One;
             transcript.BackColor = Color.White;
             transcript.ForeColor = Color.Black;
-            transcript.HideSelection = false;
-            transcript.DetectUrls = true;
-            transcript.ShortcutsEnabled = true;
             transcript.AccessibleName = "Переписка";
+            transcript.MeasureItem += TranscriptMeasureItem;
+            transcript.DrawItem += TranscriptDrawItem;
             transcript.KeyDown += TranscriptKeyDown;
-            transcript.LinkClicked += delegate(object s2, LinkClickedEventArgs le) { OpenLink(le.LinkText); };
+            transcript.Resize += delegate { QueueRemeasure(); };
             main.Controls.Add(transcript, 0, 1);
 
             // --- attach state (row 2) ---
@@ -336,11 +365,11 @@ namespace OpenCodeChat
             buttons.Controls.Add(stopBtn);
 
             copyBtn = new Button();
-            copyBtn.Text = "&Копировать ответ";
+            copyBtn.Text = "&Копировать сообщение";
             copyBtn.Width = 200;
             copyBtn.Height = 28;
-            copyBtn.AccessibleName = "Копировать последний ответ";
-            copyBtn.AccessibleDescription = "Кладёт последний ответ модели в буфер обмена";
+            copyBtn.AccessibleName = "Копировать сообщение";
+            copyBtn.AccessibleDescription = "Кладёт выделенное сообщение переписки в буфер обмена";
             copyBtn.Click += delegate { CopyLastAnswer(); };
             buttons.Controls.Add(copyBtn);
 
@@ -380,36 +409,14 @@ namespace OpenCodeChat
             statusLabel.AccessibleName = "Состояние";
             main.Controls.Add(statusLabel, 0, 6);
 
-            // Скрытая метка для озвучки ответов целиком.
-            announcer = new Label();
-            announcer.AutoSize = false;
-            announcer.Size = new Size(1, 1);
-            announcer.Location = new Point(-3000, -3000);
-            announcer.AccessibleRole = AccessibleRole.Alert;
-            announcer.AccessibleName = "Оповещение";
-            Controls.Add(announcer);
-
-            announceTimer = new System.Windows.Forms.Timer();
-            // Пауза нужна, чтобы диктор успел закончить короткую реплику
-            // о переходе, прежде чем начнётся чтение сообщения целиком.
-            announceTimer.Interval = 700;
-            announceTimer.Tick += delegate
+            // Пересчёт высот сообщений после изменения ширины окна. С задержкой,
+            // чтобы не пересчитывать на каждый пиксель при растягивании.
+            resizeTimer = new System.Windows.Forms.Timer();
+            resizeTimer.Interval = 250;
+            resizeTimer.Tick += delegate
             {
-                announceTimer.Stop();
-                if (pendingAnnounce.Length == 0) return;
-                // Только имя доступности: смена Text поднимает ещё одно событие
-                // и диктор начинает читать заново с начала, обрывая себя же.
-                announcer.AccessibleName = pendingAnnounce;
-                try
-                {
-                    // Одно событие на всё сообщение. Два события подряд
-                    // (NAME_CHANGE и ALERT) диктор обрабатывает как два
-                    // сообщения и второе обрывает первое на середине.
-                    NotifyWinEvent(0x0002, announcer.Handle, -4, 0);
-                }
-                catch
-                {
-                }
+                resizeTimer.Stop();
+                RemeasureMessages();
             };
 
             Controls.Add(main);
@@ -485,18 +492,29 @@ namespace OpenCodeChat
             startedLabel.Text = "Разговор начат: " + startedAt.ToString("dd.MM.yyyy, HH:mm");
             if (!keepScreen)
             {
-                transcript.Clear();
+                messages.Clear();
+                transcript.Items.Clear();
             }
-            AppendHeader();
-            if (!keepScreen) SaveHistory();
+            SaveHistory();
         }
 
         private bool LoadHistory()
         {
             try
             {
-                if (!File.Exists(historyRtf) || !File.Exists(historyState)) return false;
-                transcript.LoadFile(historyRtf, RichTextBoxStreamType.RichText);
+                if (!File.Exists(historyState)) return false;
+                messages.Clear();
+                transcript.Items.Clear();
+                if (File.Exists(historyText))
+                {
+                    LoadMessagesFile(historyText);
+                }
+                else
+                {
+                    // Переписка из прежних версий лежала в формате RTF.
+                    string legacy = Path.Combine(Path.GetDirectoryName(historyText), "chat.rtf");
+                    if (File.Exists(legacy)) LoadLegacyHistory(legacy);
+                }
                 string[] lines = File.ReadAllLines(historyState);
                 string savedDir = null;
                 for (int i = 0; i < lines.Length; i++)
@@ -530,7 +548,8 @@ namespace OpenCodeChat
                     sessionId = null;
                 }
                 startedLabel.Text = "Разговор начат: " + startedAt.ToString("dd.MM.yyyy, HH:mm");
-                if (transcript.TextLength == 0) return false;
+                if (messages.Count == 0) return false;
+                transcript.SelectedIndex = messages.Count - 1;
                 statusLabel.Text = sessionId == null
                     ? "Прошлая переписка восстановлена."
                     : "Прошлый разговор восстановлен, можно продолжать.";
@@ -543,13 +562,21 @@ namespace OpenCodeChat
             }
         }
 
+        // Формат переписки: каждое сообщение начинается с символа \u0001,
+        // дальше строка подписи, дальше текст до следующего \u0001.
         private void SaveHistory()
         {
             try
             {
-                string dir = Path.GetDirectoryName(historyRtf);
+                string dir = Path.GetDirectoryName(historyText);
                 if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
-                transcript.SaveFile(historyRtf, RichTextBoxStreamType.RichText);
+                StringBuilder all = new StringBuilder();
+                for (int i = 0; i < messages.Count; i++)
+                {
+                    all.Append('\u0001').Append(messages[i].Header).Append('\n');
+                    all.Append(messages[i].Body.Replace("\r\n", "\n")).Append('\n');
+                }
+                File.WriteAllText(historyText, all.ToString(), new UTF8Encoding(false));
                 ModelItem mi = modelBox.SelectedItem as ModelItem;
                 string model = mi != null ? KeyOf(mi) : preferredModel;
                 StringBuilder sb = new StringBuilder();
@@ -572,16 +599,65 @@ namespace OpenCodeChat
             return dir.TrimEnd('\\', '/');
         }
 
-        private void AppendHeader()
+        private void LoadMessagesFile(string path)
         {
-            transcript.SelectionStart = transcript.TextLength;
-            transcript.SelectionLength = 0;
-            transcript.SelectionFont = headerFont;
-            transcript.SelectionColor = Color.FromArgb(0x40, 0x40, 0x40);
-            transcript.AppendText("Разговор начат " + startedAt.ToString("dd.MM.yyyy") + " в " + startedAt.ToString("HH:mm") + "\r\n");
-            transcript.AppendText("Файлы, созданные агентом, лежат в папке projects.\r\n\r\n");
-            transcript.SelectionFont = bodyFont;
-            transcript.SelectionColor = Color.Black;
+            string all = File.ReadAllText(path, Encoding.UTF8);
+            string[] parts = all.Split('\u0001');
+            for (int i = 0; i < parts.Length; i++)
+            {
+                string part = parts[i];
+                if (part.Length == 0) continue;
+                int nl = part.IndexOf('\n');
+                string header, body;
+                if (nl < 0)
+                {
+                    header = part.TrimEnd('\r');
+                    body = "";
+                }
+                else
+                {
+                    header = part.Substring(0, nl).TrimEnd('\r');
+                    body = part.Substring(nl + 1).TrimEnd('\r', '\n');
+                }
+                if (header.Length == 0 && body.Length == 0) continue;
+                body = body.Replace("\r\n", "\n").Replace("\n", "\r\n");
+                AddMessage(header, body);
+            }
+        }
+
+        private void LoadLegacyHistory(string path)
+        {
+            using (RichTextBox box = new RichTextBox())
+            {
+                box.LoadFile(path, RichTextBoxStreamType.RichText);
+                string t = box.Text;
+                List<int> starts = new List<int>();
+                List<string> headers = new List<string>();
+                int pos = 0;
+                while (pos <= t.Length)
+                {
+                    int end = t.IndexOf('\n', pos);
+                    if (end < 0) end = t.Length;
+                    int lineEnd = end > pos && t[end - 1] == '\r' ? end - 1 : end;
+                    string line = t.Substring(pos, lineEnd - pos);
+                    if (!line.StartsWith("Разговор начат", StringComparison.Ordinal)
+                        && Regex.IsMatch(line, @"^(.+?), (\d{1,2}:\d{2})$"))
+                    {
+                        starts.Add(pos);
+                        headers.Add(line);
+                    }
+                    if (end >= t.Length) break;
+                    pos = end + 1;
+                }
+                for (int i = 0; i < starts.Count; i++)
+                {
+                    int lineEnd = t.IndexOf('\n', starts[i]);
+                    lineEnd = lineEnd < 0 ? t.Length : lineEnd + 1;
+                    int to = i + 1 < starts.Count ? starts[i + 1] : t.Length;
+                    string body = t.Substring(lineEnd, Math.Max(0, to - lineEnd)).Trim('\r', '\n', ' ');
+                    AddMessage(headers[i], body);
+                }
+            }
         }
 
         private void NewChat()
@@ -600,17 +676,32 @@ namespace OpenCodeChat
             input.Focus();
         }
 
+        private static Color HeaderColorFor(string header)
+        {
+            if (header.StartsWith("Slonobass agent", StringComparison.Ordinal))
+                return Color.FromArgb(0x1F, 0x55, 0x9E);
+            if (header.StartsWith("Файлы от агента", StringComparison.Ordinal))
+                return Color.FromArgb(0x7A, 0x4A, 0x00);
+            if (header.Length == 0)
+                return Color.FromArgb(0x60, 0x60, 0x60);
+            return Color.FromArgb(0x1A, 0x5F, 0x1A);
+        }
+
+        private void AddMessage(string header, string body)
+        {
+            MessageItem m = new MessageItem(header, body, HeaderColorFor(header));
+            messages.Add(m);
+            transcript.Items.Add(m);
+        }
+
         private void AppendBlock(string header, string body, Color headerColor)
         {
-            transcript.SelectionStart = transcript.TextLength;
-            transcript.SelectionLength = 0;
-            transcript.SelectionFont = headerFont;
-            transcript.SelectionColor = headerColor;
-            transcript.AppendText(header + "\r\n");
-            transcript.SelectionFont = bodyFont;
-            transcript.SelectionColor = Color.Black;
-            transcript.AppendText(body + "\r\n\r\n");
-            blocksText = null;
+            MessageItem m = new MessageItem(header, body, headerColor);
+            messages.Add(m);
+            transcript.Items.Add(m);
+            // Выделение переходит к новому сообщению и держит список внизу.
+            // Фокус не забираем: если человек печатает, он остаётся в поле ввода.
+            transcript.SelectedIndex = transcript.Items.Count - 1;
             SaveHistory();
         }
 
@@ -664,123 +755,149 @@ namespace OpenCodeChat
             }
         }
 
-        // ---------- озвучка и переходы по сообщениям ----------
+        // ---------- переписка: отрисовка и переходы ----------
 
-        private void Announce(string text)
+        private const TextFormatFlags WrapFlags =
+            TextFormatFlags.WordBreak | TextFormatFlags.NoPadding | TextFormatFlags.TextBoxControl;
+
+        private int TranscriptTextWidth()
         {
-            if (text == null) return;
-            text = text.Trim();
-            if (text.Length == 0) return;
-            if (text.Length > 8000) text = text.Substring(0, 8000) + " …";
-            pendingAnnounce = text;
-            announceTimer.Stop();
-            announceTimer.Start();
+            // Ширину всегда оставляем без полосы прокрутки: иначе длинное
+            // сообщение уходило бы под неё и обрезалось справа.
+            int w = transcript.ClientSize.Width - 16 - SystemInformation.VerticalScrollBarWidth;
+            if (w < 80) w = 80;
+            return w;
         }
 
-        // Каждое сообщение начинается со строки «Имя, 12:34» и тянется
-        // до следующей такой строки. Заголовок «Разговор начат» сюда не входит.
-        private List<int[]> MessageRanges()
+        private static int MeasureWrapped(string text, Font font, int width)
         {
-            string t = transcript.Text;
-            if (blocksText == t) return blocks;
-            List<int> starts = new List<int>();
-            List<string> authors = new List<string>();
-            int pos = 0;
-            while (pos <= t.Length)
+            if (text == null || text.Length == 0) return 0;
+            return TextRenderer.MeasureText(text, font, new Size(width, 1000000), WrapFlags).Height;
+        }
+
+        private void TranscriptMeasureItem(object sender, MeasureItemEventArgs e)
+        {
+            MessageItem m = e.Index >= 0 && e.Index < messages.Count ? messages[e.Index] : null;
+            if (m == null)
             {
-                int end = t.IndexOf("\n", pos, StringComparison.Ordinal);
-                if (end < 0) end = t.Length;
-                int lineEnd = end;
-                if (lineEnd > pos && t[lineEnd - 1] == '\r') lineEnd--;
-                string line = t.Substring(pos, lineEnd - pos);
-                Match m = Regex.Match(line, @"^(.+?), (\d{1,2}:\d{2})$");
-                if (m.Success && pos > 0)
-                {
-                    starts.Add(pos);
-                    string who = m.Groups[1].Value;
-                    int dot = who.IndexOf(" · ", StringComparison.Ordinal);
-                    if (dot > 0) who = who.Substring(0, dot);
-                    authors.Add(who);
-                }
-                if (end >= t.Length) break;
-                pos = end + 1;
+                e.ItemHeight = 24;
+                return;
             }
-            List<int[]> list = new List<int[]>();
-            for (int i = 0; i < starts.Count; i++)
+            int width = TranscriptTextWidth();
+            int h = 10;
+            if (m.Header.Length > 0) h += MeasureWrapped(m.Header, headerFont, width) + 2;
+            h += MeasureWrapped(m.Body, bodyFont, width);
+            e.ItemHeight = Math.Max(24, h);
+        }
+
+        private void TranscriptDrawItem(object sender, DrawItemEventArgs e)
+        {
+            if (e.Index < 0 || e.Index >= messages.Count) return;
+            MessageItem m = messages[e.Index];
+            bool selected = (e.State & DrawItemState.Selected) != 0;
+            using (SolidBrush back = new SolidBrush(selected ? SystemColors.Highlight : Color.White))
             {
-                int from = starts[i];
-                int to = i + 1 < starts.Count ? starts[i + 1] : t.Length;
-                while (to > from && IsBlankChar(t[to - 1])) to--;
-                list.Add(new int[] { from, to });
+                e.Graphics.FillRectangle(back, e.Bounds);
             }
-            blocks = list;
-            blocksAuthors = authors;
-            blocksText = t;
-            return list;
+            System.Drawing.Drawing2D.GraphicsState saved = e.Graphics.Save();
+            e.Graphics.SetClip(e.Bounds);
+            int width = TranscriptTextWidth();
+            int y = e.Bounds.Top + 4;
+            if (m.Header.Length > 0)
+            {
+                int hh = MeasureWrapped(m.Header, headerFont, width);
+                Rectangle hr = new Rectangle(e.Bounds.Left + 7, y, width, hh);
+                TextRenderer.DrawText(e.Graphics, m.Header, headerFont, hr,
+                    selected ? SystemColors.HighlightText : m.HeaderColor, WrapFlags);
+                y = hr.Bottom + 2;
+            }
+            if (m.Body.Length > 0)
+            {
+                Rectangle br = new Rectangle(e.Bounds.Left + 7, y, width,
+                    Math.Max(0, e.Bounds.Bottom - y - 4));
+                TextRenderer.DrawText(e.Graphics, m.Body, bodyFont, br,
+                    selected ? SystemColors.HighlightText : Color.Black, WrapFlags);
+            }
+            e.Graphics.Restore(saved);
         }
 
-        private void SelectBlock(int[] range)
+        private void QueueRemeasure()
         {
-            // Ставим только курсор, без выделения всего сообщения.
-            // Выделенный текст диктор тоже читает сам — и тогда вместе
-            // с оповещением получается два чтения подряд: второе обрывает
-            // первое, и конец сообщения не слышен. Курсор нужен лишь для
-            // того, чтобы следующая стрелка знала, от какого сообщения идти.
-            transcript.SelectionLength = 0;
-            transcript.SelectionStart = range[0];
-            transcript.ScrollToCaret();
-            Announce(transcript.Text.Substring(range[0], range[1] - range[0]));
+            if (transcript.ClientSize.Width == measuredWidth) return;
+            resizeTimer.Stop();
+            resizeTimer.Start();
         }
 
-        // Номер сообщения, в котором стоит курсор. После выделения блока
-        // курсор стоит на его начале, поэтому «текущее» — последнее уже
-        // начавшееся сообщение: иначе стрелки залипали на одном блоке.
-        private static int BlockAt(List<int[]> list, int caret)
+        private void RemeasureMessages()
         {
-            int idx = 0;
-            for (int i = 0; i < list.Count; i++)
-                if (list[i][0] <= caret) idx = i;
-            return idx;
+            measuredWidth = transcript.ClientSize.Width;
+            if (transcript.Items.Count == 0) return;
+            int top = transcript.TopIndex;
+            int sel = transcript.SelectedIndex;
+            transcript.BeginUpdate();
+            // Переключение режима заставляет список заново измерить пункты
+            // под новую ширину окна.
+            transcript.DrawMode = DrawMode.OwnerDrawFixed;
+            transcript.DrawMode = DrawMode.OwnerDrawVariable;
+            transcript.EndUpdate();
+            if (sel >= 0 && sel < transcript.Items.Count) transcript.SelectedIndex = sel;
+            if (top >= 0 && top < transcript.Items.Count) transcript.TopIndex = top;
         }
 
-        private void MoveBetweenBlocks(int dir)
+        private void SelectMessage(int index)
         {
-            List<int[]> list = MessageRanges();
-            if (list.Count == 0) return;
-            int idx = BlockAt(list, transcript.SelectionStart) + dir;
-            if (idx < 0) idx = 0;
-            if (idx >= list.Count) idx = list.Count - 1;
-            SelectBlock(list[idx]);
+            if (index < 0 || index >= transcript.Items.Count) return;
+            transcript.SelectedIndex = index;
+            transcript.Focus();
+        }
+
+        // Собеседник сообщения. Модель в подписи меняется, поэтому всё,
+        // что от «Slonobass agent», считается одним собеседником.
+        private string SpeakerAt(int index)
+        {
+            for (int i = index; i >= 0; i--)
+            {
+                string h = messages[i].Header;
+                if (h.Length == 0) continue;
+                int comma = h.LastIndexOf(", ", StringComparison.Ordinal);
+                if (comma > 0) h = h.Substring(0, comma);
+                int dot = h.IndexOf(" · ", StringComparison.Ordinal);
+                if (dot > 0) h = h.Substring(0, dot);
+                return h.Trim();
+            }
+            return "";
         }
 
         private void MoveBetweenSpeakers(int dir)
         {
-            List<int[]> list = MessageRanges();
-            if (list.Count == 0) return;
-            List<int> firsts = new List<int>();
-            for (int i = 0; i < list.Count; i++)
-            {
-                if (i == 0 || !string.Equals(blocksAuthors[i], blocksAuthors[i - 1], StringComparison.Ordinal))
-                    firsts.Add(i);
-            }
-            int cur = BlockAt(list, transcript.SelectionStart);
-            int g = 0;
-            for (int i = 0; i < firsts.Count; i++)
-            {
-                if (firsts[i] <= cur) g = i;
-            }
+            if (transcript.Items.Count == 0) return;
+            int cur = transcript.SelectedIndex;
+            if (cur < 0) cur = transcript.Items.Count - 1;
+            string mine = SpeakerAt(cur);
             if (dir > 0)
             {
-                if (g >= firsts.Count - 1) return;
-                g++;
+                for (int i = cur + 1; i < messages.Count; i++)
+                {
+                    if (!string.Equals(SpeakerAt(i), mine, StringComparison.Ordinal))
+                    {
+                        SelectMessage(i);
+                        return;
+                    }
+                }
             }
             else
             {
-                if (cur > firsts[g]) { /* сначала к первому сообщению этого собеседника */ }
-                else if (g > 0) g--;
-                else return;
+                int i = cur;
+                while (i > 0 && string.Equals(SpeakerAt(i - 1), mine, StringComparison.Ordinal)) i--;
+                if (i == cur)
+                {
+                    if (i == 0) return;
+                    i--;
+                    string prev = SpeakerAt(i);
+                    while (i > 0 && string.Equals(SpeakerAt(i - 1), prev, StringComparison.Ordinal)) i--;
+                }
+                SelectMessage(i);
             }
-            SelectBlock(list[firsts[g]]);
         }
 
         private static bool IsWebLink(string url)
@@ -806,34 +923,45 @@ namespace OpenCodeChat
             }
         }
 
-        private void OpenLinkAtCaret()
+        private int CurrentMessageIndex()
         {
-            string t = transcript.Text;
-            int caret = transcript.SelectionStart;
-            if (caret < 0) caret = 0;
-            if (caret > t.Length) caret = t.Length;
-            int lineStart = caret > 0 ? t.LastIndexOf('\n', caret - 1) + 1 : 0;
-            int lineEnd = t.IndexOf('\n', caret);
-            if (lineEnd < 0) lineEnd = t.Length;
-            Match m = Regex.Match(t.Substring(lineStart, lineEnd - lineStart), @"https?://[^\s<>""']+");
-            if (!m.Success)
+            int idx = transcript.SelectedIndex;
+            if (idx < 0 && messages.Count > 0) idx = messages.Count - 1;
+            return idx;
+        }
+
+        private void OpenLinkAtSelection()
+        {
+            int idx = CurrentMessageIndex();
+            if (idx < 0 || idx >= messages.Count)
             {
-                List<int[]> list = MessageRanges();
-                for (int i = 0; i < list.Count; i++)
-                {
-                    if (caret >= list[i][0] && caret <= list[i][1])
-                    {
-                        m = Regex.Match(t.Substring(list[i][0], list[i][1] - list[i][0]), @"https?://[^\s<>""']+");
-                        break;
-                    }
-                }
+                statusLabel.Text = "В переписке нет ссылки.";
+                return;
             }
+            Match m = Regex.Match(messages[idx].Plain, @"https?://[^\s<>""']+");
             if (m.Success) OpenLink(m.Value);
             else statusLabel.Text = "В этом сообщении нет ссылки.";
         }
 
-        [DllImport("user32.dll")]
-        private static extern void NotifyWinEvent(int winEvent, IntPtr hwnd, int objectType, int objectId);
+        private void CopySelectedMessage()
+        {
+            int idx = CurrentMessageIndex();
+            if (idx < 0 || idx >= messages.Count)
+            {
+                statusLabel.Text = "В переписке пока нет сообщений.";
+                return;
+            }
+            try
+            {
+                Clipboard.SetText(messages[idx].Plain);
+                statusLabel.Text = "Сообщение скопировано.";
+            }
+            catch (Exception ex)
+            {
+                Log.Exception("Копирование сообщения", ex);
+                statusLabel.Text = "Не удалось скопировать: " + ex.Message;
+            }
+        }
 
         // ---------- hotkeys ----------
 
@@ -888,38 +1016,15 @@ namespace OpenCodeChat
             }
         }
 
-        private static bool IsBlankChar(char c)
-        {
-            return c == '\r' || c == '\n' || c == ' ' || c == '\t';
-        }
-
-        // Первый непробельный символ, начиная с from. TextLength, если текста нет.
-        private int FirstText(int from)
-        {
-            string t = transcript.Text;
-            if (from < 0) from = 0;
-            int i = from;
-            while (i < t.Length && IsBlankChar(t[i])) i++;
-            return i;
-        }
-
-        // Позиция последнего непробельного символа; чтобы курсор не висел
-        // на пустых строках после ответа.
-        private int LastText()
-        {
-            string t = transcript.Text;
-            int i = t.Length - 1;
-            while (i >= 0 && IsBlankChar(t[i])) i--;
-            if (i < 0) return 0;
-            return i;
-        }
-
         private void FocusLastMessage()
         {
-            transcript.Focus();
-            transcript.SelectionStart = LastText();
-            transcript.SelectionLength = 0;
-            transcript.ScrollToCaret();
+            if (transcript.Items.Count == 0)
+            {
+                transcript.Focus();
+                statusLabel.Text = "Переписка пока пуста.";
+                return;
+            }
+            SelectMessage(transcript.Items.Count - 1);
         }
 
         private void FocusFiles()
@@ -934,6 +1039,9 @@ namespace OpenCodeChat
             }
         }
 
+        // Обычные стрелки, Home, End, PageUp и PageDown список обрабатывает
+        // сам: он переходит по целым сообщениям и диктор читает выделенный
+        // пункт целиком. Здесь только то, чего у списка нет.
         private void TranscriptKeyDown(object sender, KeyEventArgs e)
         {
             if (e.Shift || e.Alt) return;
@@ -948,31 +1056,14 @@ namespace OpenCodeChat
             {
                 e.Handled = true;
                 e.SuppressKeyPress = true;
-                OpenLinkAtCaret();
+                OpenLinkAtSelection();
                 return;
             }
-            if (e.Control) return;
-            if (e.KeyCode == Keys.Up || e.KeyCode == Keys.Down)
+            if (e.Control && e.KeyCode == Keys.C)
             {
                 e.Handled = true;
                 e.SuppressKeyPress = true;
-                MoveBetweenBlocks(e.KeyCode == Keys.Down ? 1 : -1);
-            }
-            else if (e.KeyCode == Keys.Home)
-            {
-                e.Handled = true;
-                e.SuppressKeyPress = true;
-                transcript.SelectionStart = FirstText(0);
-                transcript.SelectionLength = 0;
-                transcript.ScrollToCaret();
-            }
-            else if (e.KeyCode == Keys.End)
-            {
-                e.Handled = true;
-                e.SuppressKeyPress = true;
-                transcript.SelectionStart = LastText();
-                transcript.SelectionLength = 0;
-                transcript.ScrollToCaret();
+                CopySelectedMessage();
             }
         }
 
@@ -1051,9 +1142,6 @@ namespace OpenCodeChat
                 }
                 AppendBlock("", sb.ToString(), Color.Black);
             }
-            transcript.SelectionStart = transcript.TextLength;
-            transcript.SelectionLength = 0;
-            transcript.ScrollToCaret();
             Sounds.Outgoing();
 
             if (gguf != null)
@@ -1299,7 +1387,7 @@ namespace OpenCodeChat
             }
             lastAnswer = answerText;
 
-            int start = transcript.TextLength;
+            int answerIndex = messages.Count;
             string who = "Slonobass agent";
             if (model.Length > 0)
             {
@@ -1317,8 +1405,7 @@ namespace OpenCodeChat
                     names.Append(produced[i].Name);
                     AddFileRow(produced[i]);
                 }
-                AppendBlock("Файлы от агента, " + time,
-                    names.ToString() + "\r\nСохранить: выбрать файл в списке внизу и нажать Enter.",
+                AppendBlock("Файлы от агента, " + time, names.ToString(),
                     Color.FromArgb(0x7A, 0x4A, 0x00));
                 statusLabel.Text = "Готово. Новых файлов: " + produced.Count.ToString() + ". Они внизу, в списке файлов.";
             }
@@ -1331,17 +1418,10 @@ namespace OpenCodeChat
                 statusLabel.Text = "Остановлено. Что успело прийти — в переписке.";
             }
 
-            // Курсор — на начало ответа: отсюда стрелки продолжают работу,
-            // а сам текст читает оповещение целиком (выделение не делаем,
-            // иначе диктор читает его вторым разом и обрывает).
-            string full = transcript.Text;
-            int answerStart = FirstText(start);
-            transcript.SelectionLength = 0;
-            transcript.SelectionStart = answerStart;
-            transcript.ScrollToCaret();
-            transcript.Focus();
+            // Ответ получает фокус как выделенный пункт списка — диктор
+            // прочтёт его целиком, один раз. Никаких отдельных оповещений.
             Sounds.Incoming();
-            Announce((wasStopped ? "Ответ остановлен. " : "Новый ответ. ") + answerText);
+            SelectMessage(answerIndex);
         }
 
         private void SetBusy(bool value)
@@ -1388,6 +1468,11 @@ namespace OpenCodeChat
 
         private void CopyLastAnswer()
         {
+            if (transcript.Items.Count > 0)
+            {
+                CopySelectedMessage();
+                return;
+            }
             if (lastAnswer.Length == 0)
             {
                 statusLabel.Text = "Копировать нечего: ответов пока нет.";
@@ -1396,7 +1481,7 @@ namespace OpenCodeChat
             try
             {
                 Clipboard.SetText(lastAnswer);
-                statusLabel.Text = "Последний ответ скопирован в буфер обмена.";
+                statusLabel.Text = "Ответ скопирован в буфер обмена.";
             }
             catch (Exception ex)
             {
@@ -2008,13 +2093,14 @@ namespace OpenCodeChat
                 sb.AppendLine("{");
                 sb.AppendLine("  \"$schema\": \"https://opencode.ai/config.json\",");
                 sb.AppendLine("  \"model\": \"opencode/deepseek-v4.1-flash-free\",");
-                // В неинтерактивном запуске движок сам отклоняет всё, что требует
+                // В неинтерактивном запуске движок отклоняет всё, что требует
                 // подтверждения («Cancelled a request for input this run cannot
-                // answer»). Поэтому поиск и загрузка страниц разрешены сразу:
-                // иначе веб-поиск молча отменяется, а модель отвечает «не нашёл».
+                // answer»). Встроенный веб-поиск сам просит подтверждение даже
+                // при allow, поэтому он выключен, а загрузка страниц разрешена:
+                // поиск идёт через сайты поиска, открытые webfetch.
                 sb.AppendLine("  \"permission\": {");
                 sb.AppendLine("    \"question\": \"deny\",");
-                sb.AppendLine("    \"websearch\": \"allow\",");
+                sb.AppendLine("    \"websearch\": \"deny\",");
                 sb.AppendLine("    \"webfetch\": \"allow\"");
                 sb.AppendLine("  },");
                 sb.AppendLine("  \"provider\": {");
@@ -2092,13 +2178,13 @@ namespace OpenCodeChat
                 sb.AppendLine("Ты — помощник внутри программы Slonobass agent. Отвечай по-русски, коротко и по делу.");
                 sb.AppendLine();
                 sb.AppendLine("## Поиск в интернете");
-                sb.AppendLine("1. Сначала попробуй инструмент websearch.");
-                sb.AppendLine("2. Если поиск недоступен, вернул ошибку или пустой результат — открой страницу поиска через webfetch:");
+                sb.AppendLine("Встроенного поиска нет: инструмент websearch отключён и вызывать его не нужно. Ищи через webfetch.");
+                sb.AppendLine("1. Открой страницу поиска:");
                 sb.AppendLine("   https://lite.duckduckgo.com/lite/?q=ЗАПРОС (вместо пробелов поставь +)");
-                sb.AppendLine("3. Если не открылось — https://www.bing.com/search?q=ЗАПРОС");
-                sb.AppendLine("4. Ссылки из выдачи открывай через webfetch и читай текст страницы, а не догадывайся по названию.");
-                sb.AppendLine("5. Если в вопросе есть название сервиса или адрес сайта — попробуй сразу открыть этот сайт через webfetch.");
-                sb.AppendLine("6. Если не удалось ничего — честно скажи, что поиск сейчас не работает. Не выдумывай факты, цены и ссылки.");
+                sb.AppendLine("2. Если не открылось — https://www.bing.com/search?q=ЗАПРОС");
+                sb.AppendLine("3. Ссылки из выдачи открывай через webfetch и читай текст страницы, а не догадывайся по названию.");
+                sb.AppendLine("4. Если в вопросе есть название сервиса или адрес сайта — попробуй сразу открыть этот сайт через webfetch.");
+                sb.AppendLine("5. Если не удалось ничего — честно скажи, что поиск сейчас не работает. Не выдумывай факты, цены и ссылки.");
                 sb.AppendLine();
                 sb.AppendLine("## Файлы");
                 sb.AppendLine("Новые файлы создавай только тогда, когда об этом прямо просят.");
