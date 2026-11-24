@@ -298,6 +298,18 @@ namespace OpenCodeChat
 
             main.Controls.Add(header, 0, 0);
 
+            // Пересчёт высот сообщений после изменения ширины окна. С задержкой,
+            // чтобы не пересчитывать на каждый пиксель при растягивании.
+            // Таймер создаётся до списка: список получает событие Resize уже
+            // при добавлении в раскладку, и обработчик должен найти таймер готовым.
+            resizeTimer = new System.Windows.Forms.Timer();
+            resizeTimer.Interval = 250;
+            resizeTimer.Tick += delegate
+            {
+                resizeTimer.Stop();
+                RemeasureMessages();
+            };
+
             // --- transcript ---
             // Список, а не текстовое поле: в списке каждое сообщение — отдельный
             // пункт, стрелки переходят по пунктам, и диктор читает выбранное
@@ -408,16 +420,6 @@ namespace OpenCodeChat
             statusLabel.TextAlign = ContentAlignment.MiddleLeft;
             statusLabel.AccessibleName = "Состояние";
             main.Controls.Add(statusLabel, 0, 6);
-
-            // Пересчёт высот сообщений после изменения ширины окна. С задержкой,
-            // чтобы не пересчитывать на каждый пиксель при растягивании.
-            resizeTimer = new System.Windows.Forms.Timer();
-            resizeTimer.Interval = 250;
-            resizeTimer.Tick += delegate
-            {
-                resizeTimer.Stop();
-                RemeasureMessages();
-            };
 
             Controls.Add(main);
             KeyPress += FormKeyPress;
@@ -823,6 +825,9 @@ namespace OpenCodeChat
 
         private void QueueRemeasure()
         {
+            // Список может прислать Resize ещё до того, как окно собрано
+            // до конца; тогда ни списка, ни таймера может не быть.
+            if (transcript == null || resizeTimer == null) return;
             if (transcript.ClientSize.Width == measuredWidth) return;
             resizeTimer.Stop();
             resizeTimer.Start();
