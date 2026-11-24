@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.IO.Compression;
 using System.Media;
 using System.Net;
 using System.Runtime.InteropServices;
@@ -98,6 +99,8 @@ namespace OpenCodeChat
         private Button profileBtn;
         private Button serviceBtn;
         private Button addModelBtn;
+        private Button updateBtn;
+        private bool updating = false;
         private ComboBox modelBox;
         private Label startedLabel;
         private Label attachedLabel;
@@ -126,6 +129,7 @@ namespace OpenCodeChat
         private readonly List<MessageItem> messages = new List<MessageItem>();
         private System.Windows.Forms.Timer resizeTimer;
         private int measuredWidth = -1;
+        private bool remeasuring = false;
 
         private readonly string historyText;
         private readonly string historyState;
@@ -141,6 +145,13 @@ namespace OpenCodeChat
         private bool loadingOffline = false;
         private List<string> lastFound = new List<string>();
         private const int OfflinePort = 8099;
+
+        // Версия программы. Сравнивается с номером в теге релиза
+        // slonobass-agent-N на GitHub, чтобы кнопка «Обновить программу»
+        // знала, есть ли что скачивать.
+        internal const int AppVersion = 13;
+        private const string ReleasesApi =
+            "https://api.github.com/repos/magiyastraha-tech/sandfly-scripts/releases?per_page=20";
 
         private static readonly string[] FallbackModels = new string[]
         {
@@ -295,6 +306,14 @@ namespace OpenCodeChat
             logBtn.AccessibleDescription = "Папка log с записями об ошибках";
             logBtn.Click += delegate { OpenLogFolder(); };
             header.Controls.Add(logBtn);
+
+            updateBtn = new Button();
+            updateBtn.Text = "Обно&вить программу";
+            updateBtn.AutoSize = true;
+            updateBtn.AccessibleName = "Обновить программу";
+            updateBtn.AccessibleDescription = "Проверить новую версию, скачать её и перезапустить программу";
+            updateBtn.Click += delegate { CheckForUpdates(); };
+            header.Controls.Add(updateBtn);
 
             main.Controls.Add(header, 0, 0);
 
@@ -828,6 +847,11 @@ namespace OpenCodeChat
             // Список может прислать Resize ещё до того, как окно собрано
             // до конца; тогда ни списка, ни таймера может не быть.
             if (transcript == null || resizeTimer == null) return;
+            // Пересчёт сам может изменить ширину клиентской области (появление
+            // или исчезновение полосы прокрутки), и список пришлёт Resize.
+            // Без этого флага получается вечный цикл: пересчёт — Resize —
+            // пересчёт, а экранный диктор заново читает выбранное сообщение.
+            if (remeasuring) return;
             if (transcript.ClientSize.Width == measuredWidth) return;
             resizeTimer.Stop();
             resizeTimer.Start();
@@ -835,18 +859,40 @@ namespace OpenCodeChat
 
         private void RemeasureMessages()
         {
-            measuredWidth = transcript.ClientSize.Width;
-            if (transcript.Items.Count == 0) return;
+            if (remeasuring) return;
+            // Ширина запоминается после пересчёта, а не до: переключение
+            // режима отрисовки меняет полосу прокрутки и вместе с ней ширину.
+            // Если запомнить старую, сравнение в QueueRemeasure никогда не
+            // совпадёт и таймер будет запускаться снова и снова.
+            if (transcript.Items.Count == 0)
+            {
+                measuredWidth = transcript.ClientSize.Width;
+                return;
+            }
             int top = transcript.TopIndex;
             int sel = transcript.SelectedIndex;
-            transcript.BeginUpdate();
-            // Переключение режима заставляет список заново измерить пункты
-            // под новую ширину окна.
-            transcript.DrawMode = DrawMode.OwnerDrawFixed;
-            transcript.DrawMode = DrawMode.OwnerDrawVariable;
-            transcript.EndUpdate();
-            if (sel >= 0 && sel < transcript.Items.Count) transcript.SelectedIndex = sel;
-            if (top >= 0 && top < transcript.Items.Count) transcript.TopIndex = top;
+            remeasuring = true;
+            try
+            {
+                transcript.BeginUpdate();
+                // Переключение режима заставляет список заново измерить пункты
+                // под новую ширину окна.
+                transcript.DrawMode = DrawMode.OwnerDrawFixed;
+                transcript.DrawMode = DrawMode.OwnerDrawVariable;
+                transcript.EndUpdate();
+                // Выделение и прокрутку возвращаем, только если список их
+                // действительно сдвинул: лишние присваивания — это лишние
+                // события для экранного диктора.
+                if (sel >= 0 && sel < transcript.Items.Count && transcript.SelectedIndex != sel)
+                    transcript.SelectedIndex = sel;
+                if (top >= 0 && top < transcript.Items.Count && transcript.TopIndex != top)
+                    transcript.TopIndex = top;
+            }
+            finally
+            {
+                remeasuring = false;
+                measuredWidth = transcript.ClientSize.Width;
+            }
         }
 
         private void SelectMessage(int index)
@@ -1321,6 +1367,7 @@ namespace OpenCodeChat
 
                 string attemptErrors;
                 lock (eb) { attemptErrors = eb.ToString(); }
+                bool emptyAnswer = sb.Length == 0;
                 if (stopRequested) break;
                 if (useSession && attemptErrors.IndexOf("Location not found", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
@@ -1328,6 +1375,20 @@ namespace OpenCodeChat
                     // переехала в другую папку, движок её не находит — повторяем
                     // запрос с новой сессией.
                     Log.Write("SESSION", "Движок не нашёл папку прошлой сессии — повторяю с новой сессией.");
+                    sessionId = null;
+                    useSession = false;
+                    continue;
+                }
+                // Локальная модель требует строгого чередования ролей
+                // «пользователь — помощник». Если разговор начат другой моделью,
+                // в истории может оказаться два ответа подряд, и llama-server
+                // отвечает ошибкой Jinja. Повторяем запрос новой сессией:
+                // ответ всё равно пустой, терять нечего.
+                if (useSession && emptyAnswer
+                    && (attemptErrors.IndexOf("must alternate", StringComparison.OrdinalIgnoreCase) >= 0
+                        || attemptErrors.IndexOf("Jinja", StringComparison.OrdinalIgnoreCase) >= 0))
+                {
+                    Log.Write("SESSION", "Модель не приняла историю разговора (чередование ролей) — повторяю с новой сессией.");
                     sessionId = null;
                     useSession = false;
                     continue;
@@ -2284,6 +2345,271 @@ namespace OpenCodeChat
             }
             catch
             {
+            }
+        }
+
+        // ---------- обновление программы ----------
+
+        private static string UpdateFolder
+        {
+            get { return Path.Combine(Path.GetTempPath(), "SlonobassAgent-update"); }
+        }
+
+        private void CheckForUpdates()
+        {
+            if (updating) return;
+            if (busy)
+            {
+                MessageBox.Show(this,
+                    "Сначала дождитесь ответа агента или остановите его: пока идёт ответ, файлы программы заняты.",
+                    "Slonobass agent", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            updating = true;
+            updateBtn.Enabled = false;
+            statusLabel.Text = "Проверяю обновление…";
+            Thread t = new Thread(delegate()
+            {
+                int latest = 0;
+                string zipUrl = null;
+                string error = null;
+                try
+                {
+                    string json = FetchReleaseList();
+                    FindLatestRelease(json, out latest, out zipUrl);
+                    if (latest == 0) error = "на сервере не нашлось файла обновления.";
+                }
+                catch (Exception ex)
+                {
+                    error = ex.Message;
+                    Log.Exception("Проверка обновления", ex);
+                }
+                try
+                {
+                    BeginInvoke(new Action(delegate() { AfterUpdateCheck(latest, zipUrl, error); }));
+                }
+                catch
+                {
+                }
+            });
+            t.IsBackground = true;
+            t.Start();
+        }
+
+        private void AfterUpdateCheck(int latest, string zipUrl, string error)
+        {
+            if (error != null)
+            {
+                ResetUpdate("Не удалось проверить обновление.");
+                MessageBox.Show(this,
+                    "Не удалось проверить обновление: " + error
+                    + "\r\n\r\nПроверьте подключение к интернету и попробуйте ещё раз.",
+                    "Slonobass agent", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            if (latest <= AppVersion)
+            {
+                ResetUpdate("Обновлений нет.");
+                MessageBox.Show(this,
+                    "Установлена последняя версия программы: " + AppVersion.ToString() + ".",
+                    "Slonobass agent", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            DialogResult r = MessageBox.Show(this,
+                "Доступна версия " + latest.ToString() + ". Сейчас установлена " + AppVersion.ToString() + "."
+                + "\r\n\r\nСкачать обновление сейчас? Программа закроется, установит новую версию и запустится снова.",
+                "Slonobass agent", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (r != DialogResult.Yes)
+            {
+                ResetUpdate("Обновление отложено.");
+                return;
+            }
+            statusLabel.Text = "Скачиваю обновление…";
+            Thread t = new Thread(delegate() { DownloadAndApply(zipUrl, latest); });
+            t.IsBackground = true;
+            t.Start();
+        }
+
+        private void DownloadAndApply(string zipUrl, int version)
+        {
+            string error = null;
+            try
+            {
+                string folder = UpdateFolder;
+                try
+                {
+                    if (Directory.Exists(folder)) Directory.Delete(folder, true);
+                }
+                catch
+                {
+                }
+                string staging = Path.Combine(folder, "new");
+                Directory.CreateDirectory(staging);
+                string zipPath = Path.Combine(folder, "update.zip");
+                DownloadTo(zipUrl, zipPath);
+                SetStatusSafe("Распаковываю обновление…");
+                ZipFile.ExtractToDirectory(zipPath, staging);
+                try { File.Delete(zipPath); } catch { }
+                Log.Write("UPDATE", "Обновление " + version.ToString() + " скачано и распаковано: " + staging);
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                Log.Exception("Скачивание обновления", ex);
+            }
+            try
+            {
+                BeginInvoke(new Action(delegate() { AfterDownload(error); }));
+            }
+            catch
+            {
+            }
+        }
+
+        private void AfterDownload(string error)
+        {
+            if (error != null)
+            {
+                ResetUpdate("Не удалось скачать обновление.");
+                MessageBox.Show(this,
+                    "Не удалось скачать обновление: " + error
+                    + "\r\n\r\nПроверьте подключение к интернету и попробуйте ещё раз.",
+                    "Slonobass agent", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            string install = AppDomain.CurrentDomain.BaseDirectory;
+            if (!CanWriteTo(install))
+            {
+                ResetUpdate("Нет прав записи в папку программы.");
+                MessageBox.Show(this,
+                    "Программа лежит в папке, куда нет прав записи:\r\n" + install
+                    + "\r\n\r\nПеренесите папку программы туда, где можно записывать (например, в «Документы»),"
+                    + " и повторите обновление.",
+                    "Slonobass agent", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            try
+            {
+                StopOffline();
+                // Помощник — копия этой же программы во временной папке. Он
+                // дождётся закрытия текущей, заменит файлы и запустит программу.
+                string helper = Path.Combine(UpdateFolder, "Slonobass-Agent-update.exe");
+                File.Copy(Application.ExecutablePath, helper, true);
+                ProcessStartInfo psi = new ProcessStartInfo(helper);
+                psi.Arguments = "--apply-update \"" + Path.Combine(UpdateFolder, "new") + "\" \""
+                    + install.TrimEnd('\\') + "\" " + Process.GetCurrentProcess().Id.ToString();
+                psi.WorkingDirectory = UpdateFolder;
+                psi.UseShellExecute = false;
+                Process.Start(psi);
+                statusLabel.Text = "Устанавливаю обновление…";
+                Log.Write("UPDATE", "Запущен помощник обновления; программа закрывается.");
+                Application.Exit();
+            }
+            catch (Exception ex)
+            {
+                ResetUpdate("Не удалось запустить обновление.");
+                MessageBox.Show(this,
+                    "Не удалось запустить обновление: " + ex.Message,
+                    "Slonobass agent", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        private void ResetUpdate(string status)
+        {
+            updating = false;
+            if (updateBtn != null) updateBtn.Enabled = true;
+            statusLabel.Text = status;
+        }
+
+        private static string FetchReleaseList()
+        {
+            HttpWebRequest req = (HttpWebRequest)WebRequest.Create(ReleasesApi);
+            req.Proxy = null;
+            req.UserAgent = "SlonobassAgent/" + AppVersion.ToString();
+            req.Accept = "application/vnd.github+json";
+            req.Timeout = 15000;
+            req.ReadWriteTimeout = 15000;
+            req.KeepAlive = false;
+            using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
+            using (StreamReader reader = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
+            {
+                return reader.ReadToEnd();
+            }
+        }
+
+        // В ответе GitHub — список релизов, новые сверху. У каждого тег вида
+        // slonobass-agent-N и рядом ссылка на zip. Берём самый большой номер,
+        // у которого есть zip: порядок ответа может измениться.
+        private static void FindLatestRelease(string json, out int latest, out string zipUrl)
+        {
+            latest = 0;
+            zipUrl = null;
+            if (json == null) return;
+            MatchCollection tags = Regex.Matches(json, "\"tag_name\"\\s*:\\s*\"slonobass-agent-(\\d+)\"");
+            for (int i = 0; i < tags.Count; i++)
+            {
+                int n;
+                if (!int.TryParse(tags[i].Groups[1].Value, out n)) continue;
+                if (n <= latest) continue;
+                int start = tags[i].Index;
+                int end = i + 1 < tags.Count ? tags[i + 1].Index : json.Length;
+                Match zip = Regex.Match(json.Substring(start, end - start),
+                    "\"browser_download_url\"\\s*:\\s*\"([^\"]+)\\.zip\"");
+                if (!zip.Success) continue;
+                latest = n;
+                zipUrl = zip.Groups[1].Value.Replace("\\/", "/");
+            }
+        }
+
+        private void DownloadTo(string url, string path)
+        {
+            HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
+            req.Proxy = null;
+            req.UserAgent = "SlonobassAgent/" + AppVersion.ToString();
+            req.Timeout = 30000;
+            req.ReadWriteTimeout = 60000;
+            req.KeepAlive = false;
+            using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
+            using (Stream input = resp.GetResponseStream())
+            using (FileStream output = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                long total = resp.ContentLength;
+                byte[] buffer = new byte[81920];
+                long done = 0;
+                int lastPercent = -1;
+                int read;
+                while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    output.Write(buffer, 0, read);
+                    done += read;
+                    if (total > 0)
+                    {
+                        int percent = (int)(done * 100 / total);
+                        if (percent != lastPercent && percent % 5 == 0)
+                        {
+                            lastPercent = percent;
+                            SetStatusSafe("Скачиваю обновление… " + percent.ToString() + "%");
+                        }
+                    }
+                }
+            }
+        }
+
+        private static bool CanWriteTo(string dir)
+        {
+            try
+            {
+                string probe = Path.Combine(dir, ".write-test-" + Guid.NewGuid().ToString("N") + ".tmp");
+                using (FileStream s = new FileStream(probe, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    s.WriteByte(0);
+                }
+                File.Delete(probe);
+                return true;
+            }
+            catch
+            {
+                return false;
             }
         }
 
@@ -3726,11 +4052,205 @@ namespace OpenCodeChat
         }
     }
 
+    // Помощник обновления. Запускается копией программы из временной папки,
+    // когда основная программа уже закрывается: дожидается её выхода, заменяет
+    // файлы и запускает новую версию. Настройки и журналы не трогает.
+    internal static class Updater
+    {
+        private const string ApplySwitch = "--apply-update";
+
+        private static string Folder
+        {
+            get { return Path.Combine(Path.GetTempPath(), "SlonobassAgent-update"); }
+        }
+
+        private static string LogFile
+        {
+            get { return Path.Combine(Folder, "update.log"); }
+        }
+
+        private static void Note(string text)
+        {
+            try
+            {
+                Directory.CreateDirectory(Folder);
+                File.AppendAllText(LogFile,
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + text + "\r\n",
+                    new UTF8Encoding(false));
+            }
+            catch
+            {
+            }
+        }
+
+        public static bool Handles(string[] args)
+        {
+            return args != null && args.Length >= 4
+                && string.Equals(args[0], ApplySwitch, StringComparison.Ordinal);
+        }
+
+        public static void Apply(string sourceRoot, string installDir, string pidText)
+        {
+            Note("Начало обновления. Источник: " + sourceRoot + "; установка: " + installDir);
+            WaitForParent(pidText);
+            try
+            {
+                string source = sourceRoot;
+                string nested = Path.Combine(sourceRoot, "Slonobass-Agent");
+                if (Directory.Exists(nested)) source = nested;
+                int copied = CopyTree(source, installDir);
+                Note("Скопировано файлов: " + copied.ToString() + ".");
+            }
+            catch (Exception ex)
+            {
+                Note("ОШИБКА при замене файлов: " + ex.ToString());
+            }
+            StartApp(installDir);
+            Cleanup(sourceRoot);
+        }
+
+        private static void WaitForParent(string pidText)
+        {
+            int pid;
+            if (pidText == null || !int.TryParse(pidText, out pid) || pid <= 0) return;
+            DateTime until = DateTime.Now.AddSeconds(90);
+            while (DateTime.Now < until)
+            {
+                try
+                {
+                    using (Process p = Process.GetProcessById(pid))
+                    {
+                        if (p.HasExited) break;
+                    }
+                }
+                catch
+                {
+                    break;
+                }
+                Thread.Sleep(250);
+            }
+            // Дать Windows отпустить файлы после закрытия программы.
+            Thread.Sleep(1200);
+        }
+
+        private static int CopyTree(string source, string target)
+        {
+            int copied = 0;
+            string[] files = Directory.GetFiles(source, "*", SearchOption.AllDirectories);
+            for (int i = 0; i < files.Length; i++)
+            {
+                string rel = files[i].Substring(source.Length).TrimStart('\\', '/');
+                string low = rel.Replace('/', '\\').ToLowerInvariant();
+                // Настройки движка и журналы пользователя не трогаем.
+                if (low.StartsWith("projects\\", StringComparison.Ordinal)) continue;
+                if (low.StartsWith("log\\", StringComparison.Ordinal)) continue;
+                string dst = Path.Combine(target, rel);
+                if (File.Exists(dst) && SameFile(files[i], dst)) continue;
+                string dir = Path.GetDirectoryName(dst);
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                CopyWithRetry(files[i], dst);
+                copied++;
+            }
+            return copied;
+        }
+
+        private static bool SameFile(string a, string b)
+        {
+            try
+            {
+                FileInfo fa = new FileInfo(a);
+                FileInfo fb = new FileInfo(b);
+                return fa.Length == fb.Length
+                    && Math.Abs((fa.LastWriteTimeUtc - fb.LastWriteTimeUtc).TotalSeconds) < 2;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static void CopyWithRetry(string source, string target)
+        {
+            for (int attempt = 0; attempt < 10; attempt++)
+            {
+                try
+                {
+                    File.Copy(source, target, true);
+                    return;
+                }
+                catch (IOException)
+                {
+                }
+                catch (UnauthorizedAccessException)
+                {
+                }
+                Thread.Sleep(400);
+            }
+            File.Copy(source, target, true);
+        }
+
+        private static void StartApp(string installDir)
+        {
+            try
+            {
+                string exe = Path.Combine(installDir, "Slonobass-Agent.exe");
+                if (!File.Exists(exe))
+                {
+                    Note("Не найден запускаемый файл: " + exe);
+                    return;
+                }
+                ProcessStartInfo psi = new ProcessStartInfo(exe);
+                psi.WorkingDirectory = installDir;
+                psi.UseShellExecute = true;
+                Process.Start(psi);
+                Note("Программа запущена заново.");
+            }
+            catch (Exception ex)
+            {
+                Note("ОШИБКА при запуске программы: " + ex.ToString());
+            }
+        }
+
+        private static void Cleanup(string stagingRoot)
+        {
+            try
+            {
+                if (Directory.Exists(stagingRoot)) Directory.Delete(stagingRoot, true);
+            }
+            catch
+            {
+            }
+            try
+            {
+                string zip = Path.Combine(Folder, "update.zip");
+                if (File.Exists(zip)) File.Delete(zip);
+            }
+            catch
+            {
+            }
+        }
+    }
+
     internal static class Program
     {
         [STAThread]
-        private static void Main()
+        private static void Main(string[] args)
         {
+            if (Updater.Handles(args))
+            {
+                Updater.Apply(args[1], args[2], args[3]);
+                return;
+            }
+
+            try
+            {
+                ServicePointManager.SecurityProtocol =
+                    ServicePointManager.SecurityProtocol | SecurityProtocolType.Tls12;
+            }
+            catch
+            {
+            }
+
             Log.Init(AppDomain.CurrentDomain.BaseDirectory);
 
             Application.EnableVisualStyles();
