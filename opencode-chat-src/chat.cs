@@ -149,7 +149,7 @@ namespace OpenCodeChat
         // Версия программы. Сравнивается с номером в теге релиза
         // slonobass-agent-N на GitHub, чтобы кнопка «Обновить программу»
         // знала, есть ли что скачивать.
-        internal const int AppVersion = 16;
+        internal const int AppVersion = 17;
         private const string ReleasesApi =
             "https://api.github.com/repos/magiyastraha-tech/sandfly-scripts/releases?per_page=20";
 
@@ -3513,6 +3513,7 @@ namespace OpenCodeChat
         private CheckBox showBox;
         private CheckedListBox modelsList;
         private Label stateLabel;
+        private Label fetchLabel;
         private Button checkBtn;
         private Button saveBtn;
 
@@ -3524,7 +3525,7 @@ namespace OpenCodeChat
             MaximizeBox = false;
             MinimizeBox = false;
             ShowInTaskbar = false;
-            ClientSize = new Size(760, 650);
+            ClientSize = new Size(760, 690);
             Font = new Font("Segoe UI", 10f);
 
             Label intro = new Label();
@@ -3610,13 +3611,31 @@ namespace OpenCodeChat
 
             modelsList = new CheckedListBox();
             modelsList.Location = new Point(14, 370);
-            modelsList.Size = new Size(732, 200);
+            modelsList.Size = new Size(732, 170);
             modelsList.CheckOnClick = true;
             modelsList.AccessibleName = "Модели сервиса";
             Controls.Add(modelsList);
 
-            Label fetchLabel = new Label();
-            fetchLabel.Location = new Point(14, 576);
+            Button clearBtn = new Button();
+            clearBtn.Text = "&Снять всё";
+            clearBtn.Location = new Point(14, 548);
+            clearBtn.Size = new Size(150, 30);
+            clearBtn.AccessibleName = "Снять все галочки с моделей";
+            clearBtn.AccessibleDescription = "Снимает отметки со всех моделей в списке";
+            clearBtn.Click += delegate { SetAllChecked(false); };
+            Controls.Add(clearBtn);
+
+            Button allBtn = new Button();
+            allBtn.Text = "Вы&делить всё";
+            allBtn.Location = new Point(174, 548);
+            allBtn.Size = new Size(150, 30);
+            allBtn.AccessibleName = "Выделить все модели";
+            allBtn.AccessibleDescription = "Отмечает все модели в списке";
+            allBtn.Click += delegate { SetAllChecked(true); };
+            Controls.Add(allBtn);
+
+            fetchLabel = new Label();
+            fetchLabel.Location = new Point(14, 584);
             fetchLabel.Size = new Size(732, 22);
             fetchLabel.AccessibleName = "Результат проверки";
             fetchLabel.Name = "fetchLabel";
@@ -3677,6 +3696,7 @@ namespace OpenCodeChat
             string[] saved = Service.Models;
             modelsList.Items.Clear();
             for (int i = 0; i < saved.Length; i++) modelsList.Items.Add(saved[i], true);
+            if (fetchLabel != null && modelsList.Items.Count > 0) fetchLabel.Text = CheckedInfo();
             UpdateState();
         }
 
@@ -3777,12 +3797,6 @@ namespace OpenCodeChat
         {
             checkBtn.Enabled = true;
             saveBtn.Enabled = true;
-            Label fetchLabel = null;
-            for (int i = 0; i < Controls.Count; i++)
-            {
-                Label l = Controls[i] as Label;
-                if (l != null && l.Name == "fetchLabel") { fetchLabel = l; break; }
-            }
             if (err != null)
             {
                 stateLabel.Text = "Проверка не удалась: " + err;
@@ -3799,9 +3813,12 @@ namespace OpenCodeChat
             modelsList.Items.Clear();
             for (int i = 0; i < found.Count; i++)
             {
-                bool check = previous.Count == 0 || previous.Contains(found[i]);
-                modelsList.Items.Add(found[i], check);
+                // Новые модели не отмечаем сами: иначе в главном списке
+                // окажутся все модели сервиса. Отмечается только то, что
+                // человек выбрал раньше или выберет сейчас.
+                modelsList.Items.Add(found[i], previous.Contains(found[i]));
             }
+            if (fetchLabel != null) fetchLabel.Text = CheckedInfo() + " Нажмите «Снять всё», отметьте нужные и «Сохранить».";
             if (probe != null && probe.Length > 0)
             {
                 stateLabel.Text = "Модели получены (" + found.Count.ToString()
@@ -3812,7 +3829,32 @@ namespace OpenCodeChat
                 return;
             }
             stateLabel.Text = "Ключ принят. Найдено моделей: " + found.Count.ToString() + ".";
-            if (fetchLabel != null) fetchLabel.Text = "Отметьте нужные модели и нажмите «Сохранить».";
+        }
+
+        // «Снять всё» и «Выделить всё». Считаем отметки выше и сообщаем
+        // результат словами — так человек знает, что нажатие сработало.
+        private void SetAllChecked(bool value)
+        {
+            if (modelsList.Items.Count == 0)
+            {
+                if (fetchLabel != null) fetchLabel.Text = "Список моделей пуст. Сначала нажмите «Проверить и получить модели».";
+                modelsList.Focus();
+                return;
+            }
+            for (int i = 0; i < modelsList.Items.Count; i++) modelsList.SetItemChecked(i, value);
+            if (modelsList.Items.Count > 0) modelsList.SelectedIndex = 0;
+            if (fetchLabel != null) fetchLabel.Text = CheckedInfo() + " Не забудьте «Сохранить».";
+            modelsList.Focus();
+        }
+
+        private string CheckedInfo()
+        {
+            int n = 0;
+            for (int i = 0; i < modelsList.Items.Count; i++)
+            {
+                if (modelsList.GetItemChecked(i)) n++;
+            }
+            return "Отмечено моделей: " + n.ToString() + " из " + modelsList.Items.Count.ToString() + ".";
         }
 
         private static string Describe(Exception ex)
