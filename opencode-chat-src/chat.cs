@@ -131,9 +131,21 @@ namespace OpenCodeChat
         private int measuredWidth = -1;
         private bool remeasuring = false;
 
-        private readonly string historyText;
-        private readonly string historyState;
+        // Своя переписка у каждой модели: файлы лежат в папке chats,
+        // имя — из ключа модели. historyText/historyState указывают
+        // на переписку выбранной сейчас модели.
+        private string historyText;
+        private string historyState;
+        private readonly string chatsDir;
+        private readonly string settingsFile;
         private string preferredModel = "";
+        private string currentModelKey = "";
+        private bool suppressModelSwitch = false;
+
+        // История, импортированная из чата другой модели. Добавляется
+        // в текст следующего запроса один раз, чтобы движок её увидел.
+        private string importContext = "";
+        private string importSource = "";
 
         // Офлайн-модели: файлы .gguf и сервер llama.cpp рядом с программой.
         private readonly string modelsFile;
@@ -149,7 +161,7 @@ namespace OpenCodeChat
         // Версия программы. Сравнивается с номером в теге релиза
         // slonobass-agent-N на GitHub, чтобы кнопка «Обновить программу»
         // знала, есть ли что скачивать.
-        internal const int AppVersion = 17;
+        internal const int AppVersion = 18;
         private const string ReleasesApi =
             "https://api.github.com/repos/magiyastraha-tech/sandfly-scripts/releases?per_page=20";
 
@@ -184,6 +196,8 @@ namespace OpenCodeChat
                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "OpenCodeChat");
             historyText = Path.Combine(stateDir, "chat.txt");
             historyState = Path.Combine(stateDir, "chat.ini");
+            chatsDir = Path.Combine(stateDir, "chats");
+            settingsFile = Path.Combine(stateDir, "settings.ini");
             modelsFile = Path.Combine(stateDir, "models.txt");
             llamaDir = Path.Combine(root, "engine", "llama");
 
@@ -195,6 +209,8 @@ namespace OpenCodeChat
 
             BuildUi();
             BuildMenus();
+            modelBox.SelectedIndexChanged += ModelChanged;
+            PrepareChatStore();
             if (!LoadHistory()) StartChat(false);
 
             transcript.Font = bodyFont;
@@ -599,7 +615,8 @@ namespace OpenCodeChat
                 }
                 File.WriteAllText(historyText, all.ToString(), new UTF8Encoding(false));
                 ModelItem mi = modelBox.SelectedItem as ModelItem;
-                string model = mi != null ? KeyOf(mi) : preferredModel;
+                string model = currentModelKey;
+                if (model.Length == 0) model = mi != null ? KeyOf(mi) : preferredModel;
                 StringBuilder sb = new StringBuilder();
                 sb.AppendLine("session=" + (sessionId == null ? "" : sessionId));
                 sb.AppendLine("started=" + startedAt.ToString("yyyy-MM-dd HH:mm:ss"));
@@ -614,14 +631,200 @@ namespace OpenCodeChat
             }
         }
 
-        private static string NormalizeDir(string dir)
+        // ---------- чат у каждой модели ----------
+
+        // Готовим папку chats и переносим туда переписку прежних версий,
+        // где чат был один на все модели.
+        private void PrepareChatStore()
         {
-            if (dir == null) return "";
-            return dir.TrimEnd('\\', '/');
+            try
+            {
+                if (!Directory.Exists(chatsDir)) Directory.CreateDirectory(chatsDir);
+                if (File.Exists(settingsFile))
+                {
+                    string[] lines = File.ReadAllLines(settingsFile, Encoding.UTF8);
+                    for (int i = 0; i < lines.Length; i++)
+                    {
+                        string line = lines[i];
+                        if (line.StartsWith("model=", StringComparison.Ordinal))
+                            currentModelKey = line.Substring(6).Trim();
+                    }
+                }
+                else
+                {
+                    string legacyModel = "";
+                    if (File.Exists(historyState))
+                    {
+                        string[] lines = File.ReadAllLines(historyState);
+                        for (int i = 0; i < lines.Length; i++)
+                        {
+                            string line = lines[i];
+                            if (line.StartsWith("model=", StringComparison.Ordinal))
+                                legacyModel = line.Substring(6).Trim();
+                        }
+                    }
+                    currentModelKey = legacyModel;
+                    if (currentModelKey.Length > 0 && (File.Exists(historyText) || File.Exists(historyState)))
+                    {
+                        string name = SafeName(currentModelKey);
+                        string text = Path.Combine(chatsDir, name + ".txt");
+                        string state = Path.Combine(chatsDir, name + ".ini");
+                        if (File.Exists(historyText) && !File.Exists(text)) File.Move(historyText, text);
+                        if (File.Exists(historyState) && !File.Exists(state)) File.Move(historyState, state);
+                        string legacyRtf = Path.Combine(Path.GetDirectoryName(historyText), "chat.rtf");
+                        string movedRtf = Path.Combine(chatsDir, "chat.rtf");
+                        if (File.Exists(legacyRtf) && !File.Exists(movedRtf)) File.Move(legacyRtf, movedRtf);
+                        Log.Write("CHATS", "Переписка прежней версии перенесена в чат модели: " + currentModelKey);
+                    }
+                    SaveSettings();
+                }
+                if (currentModelKey.Length > 0) UseChatPaths(currentModelKey);
+            }
+            catch (Exception ex)
+            {
+                Log.Write("ERROR", "Не удалось подготовить папку чатов: " + ex.Message);
+            }
         }
 
-        private void LoadMessagesFile(string path)
+        private static string SafeName(string key)
         {
+            if (key == null) key = "";
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < key.Length && sb.Length < 60; i++)
+            {
+                char c = key[i];
+                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                    || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-')
+                    sb.Append(c);
+                else
+                    sb.Append('_');
+            }
+            if (sb.Length == 0) sb.Append("model");
+            uint h = 2166136261u;
+            for (int i = 0; i < key.Length; i++)
+            {
+                h ^= key[i];
+                h *= 16777619u;
+            }
+            return sb.ToString() + "-" + h.ToString("x8");
+        }
+
+        private void UseChatPaths(string key)
+        {
+            string name = SafeName(key);
+            historyText = Path.Combine(chatsDir, name + ".txt");
+            historyState = Path.Combine(chatsDir, name + ".ini");
+        }
+
+        private void SaveSettings()
+        {
+            try
+            {
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine("model=" + (currentModelKey == null ? "" : currentModelKey));
+                File.WriteAllText(settingsFile, sb.ToString(), Encoding.UTF8);
+            }
+            catch (Exception ex)
+            {
+                Log.Write("ERROR", "Не удалось сохранить настройки: " + ex.Message);
+            }
+        }
+
+        // Переписка прежних версий принадлежит модели, которую пользователь
+        // выберет первой: переносим её файлы в чат этой модели.
+        private void AdoptLegacy(string key)
+        {
+            try
+            {
+                if (key == null || key.Length == 0) return;
+                string name = SafeName(key);
+                string text = Path.Combine(chatsDir, name + ".txt");
+                string state = Path.Combine(chatsDir, name + ".ini");
+                if (File.Exists(historyText) && !File.Exists(text)) File.Move(historyText, text);
+                if (File.Exists(historyState) && !File.Exists(state)) File.Move(historyState, state);
+                string legacyRtf = Path.Combine(Path.GetDirectoryName(historyText), "chat.rtf");
+                string movedRtf = Path.Combine(chatsDir, "chat.rtf");
+                if (File.Exists(legacyRtf) && !File.Exists(movedRtf)) File.Move(legacyRtf, movedRtf);
+            }
+            catch (Exception ex)
+            {
+                Log.Write("ERROR", "Не удалось перенести старую переписку: " + ex.Message);
+            }
+        }
+
+        private void ModelChanged(object sender, EventArgs e)
+        {
+            if (suppressModelSwitch) return;
+            ModelItem mi = modelBox.SelectedItem as ModelItem;
+            if (mi == null) return;
+            string key = KeyOf(mi);
+            if (string.Equals(key, currentModelKey, StringComparison.Ordinal)) return;
+            if (busy)
+            {
+                suppressModelSwitch = true;
+                SelectByKey(currentModelKey);
+                suppressModelSwitch = false;
+                statusLabel.Text = "Сейчас идёт ответ. Модель смените, когда агент закончит.";
+                return;
+            }
+            SwitchToModel(mi, true);
+        }
+
+        private bool SelectByKey(string key)
+        {
+            if (key == null || key.Length == 0) return false;
+            for (int i = 0; i < modelBox.Items.Count; i++)
+            {
+                ModelItem m = modelBox.Items[i] as ModelItem;
+                if (m != null && string.Equals(KeyOf(m), key, StringComparison.Ordinal))
+                {
+                    modelBox.SelectedIndex = i;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private void SwitchToModel(ModelItem item, bool announce)
+        {
+            string key = KeyOf(item);
+            SaveHistory();
+            if (currentModelKey.Length == 0) AdoptLegacy(key);
+            currentModelKey = key;
+            preferredModel = key;
+            UseChatPaths(key);
+            sessionId = null;
+            startedAt = DateTime.Now;
+            startedLabel.Text = "Разговор начат: " + startedAt.ToString("dd.MM.yyyy, HH:mm");
+            importContext = "";
+            importSource = "";
+            messages.Clear();
+            transcript.Items.Clear();
+            bool restored = LoadHistory();
+            if (!restored) StartChat(false);
+            SaveSettings();
+            if (announce)
+            {
+                string label = item != null ? item.ToString() : key;
+                statusLabel.Text = restored
+                    ? "Чат модели «" + label + "». Сообщений: " + messages.Count.ToString() + "."
+                    : "Новый чат модели «" + label + "».";
+            }
+        }
+
+        private void AlignChatToSelection(bool announce)
+        {
+            ModelItem mi = modelBox.SelectedItem as ModelItem;
+            if (mi == null) return;
+            string key = KeyOf(mi);
+            if (string.Equals(key, currentModelKey, StringComparison.Ordinal)) return;
+            SwitchToModel(mi, announce);
+        }
+
+        private List<MessageItem> ReadMessages(string path)
+        {
+            List<MessageItem> res = new List<MessageItem>();
+            if (path == null || !File.Exists(path)) return res;
             string all = File.ReadAllText(path, Encoding.UTF8);
             string[] parts = all.Split('\u0001');
             for (int i = 0; i < parts.Length; i++)
@@ -642,8 +845,128 @@ namespace OpenCodeChat
                 }
                 if (header.Length == 0 && body.Length == 0) continue;
                 body = body.Replace("\r\n", "\n").Replace("\n", "\r\n");
-                AddMessage(header, body);
+                res.Add(new MessageItem(header, body, HeaderColorFor(header)));
             }
+            return res;
+        }
+
+        private static int CountMessages(string path)
+        {
+            try
+            {
+                if (!File.Exists(path)) return 0;
+                string all = File.ReadAllText(path, Encoding.UTF8);
+                string[] parts = all.Split('\u0001');
+                int n = 0;
+                for (int i = 0; i < parts.Length; i++)
+                {
+                    if (parts[i].Trim().Length > 0) n++;
+                }
+                return n;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        // Ctrl+I: выбрать чат другой модели и добавить его сообщения в текущий.
+        private void ImportHistory()
+        {
+            List<ModelItem> sources = new List<ModelItem>();
+            List<int> counts = new List<int>();
+            List<string> paths = new List<string>();
+            for (int i = 0; i < modelBox.Items.Count; i++)
+            {
+                ModelItem m = modelBox.Items[i] as ModelItem;
+                if (m == null) continue;
+                string key = KeyOf(m);
+                if (key.Length == 0 || string.Equals(key, currentModelKey, StringComparison.Ordinal)) continue;
+                string text = Path.Combine(chatsDir, SafeName(key) + ".txt");
+                int n = CountMessages(text);
+                if (n <= 0) continue;
+                sources.Add(m);
+                counts.Add(n);
+                paths.Add(text);
+            }
+            if (sources.Count == 0)
+            {
+                statusLabel.Text = "Других чатов с историей нет.";
+                MessageBox.Show(this,
+                    "Импортировать нечего: ни у одной другой модели пока нет переписки.\r\n"
+                    + "Поговорите с другой моделью — её чат сохранится, и его можно будет импортировать.",
+                    "Импорт истории", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            int chosen;
+            using (ImportForm dlg = new ImportForm(sources, counts))
+            {
+                if (dlg.ShowDialog(this) != DialogResult.OK) { input.Focus(); return; }
+                chosen = dlg.SelectedIndex;
+            }
+            if (chosen < 0 || chosen >= sources.Count) { input.Focus(); return; }
+
+            ModelItem src = sources[chosen];
+            List<MessageItem> list = ReadMessages(paths[chosen]);
+            if (list.Count == 0)
+            {
+                statusLabel.Text = "В выбранном чате нет сообщений.";
+                input.Focus();
+                return;
+            }
+
+            string label = src.ToString();
+            AddMessage("Импорт истории из чата «" + label + "»",
+                "Сообщений: " + list.Count.ToString() + ".", Color.FromArgb(0x1F, 0x3A, 0x5F));
+            for (int i = 0; i < list.Count; i++)
+            {
+                AddMessage(list[i].Header, list[i].Body);
+            }
+
+            // Движок не знает о сообщениях другого чата: передаём их
+            // в следующем запросе. Берём последние сообщения, чтобы
+            // не упереться в ограничение длины командной строки.
+            const int limit = 8000;
+            StringBuilder tail = new StringBuilder();
+            int used = 0;
+            bool trimmed = false;
+            for (int i = list.Count - 1; i >= 0; i--)
+            {
+                StringBuilder one = new StringBuilder();
+                if (list[i].Header.Length > 0) one.Append(list[i].Header).Append("\r\n");
+                one.Append(list[i].Body).Append("\r\n\r\n");
+                if (used + one.Length > limit && used > 0) { trimmed = true; break; }
+                tail.Insert(0, one.ToString());
+                used += one.Length;
+            }
+            StringBuilder ctx = new StringBuilder();
+            ctx.Append("Ниже — история, импортированная из чата другой модели («");
+            ctx.Append(label).Append("»). Используй её как продолжение этого разговора.\r\n\r\n");
+            if (trimmed) ctx.Append("(Самое начало истории не поместилось и опущено.)\r\n\r\n");
+            ctx.Append(tail.ToString());
+            importContext = ctx.ToString();
+            importSource = label;
+
+            SaveHistory();
+            transcript.SelectedIndex = messages.Count - 1;
+            statusLabel.Text = "Импортировано сообщений: " + list.Count.ToString()
+                + " из чата «" + label + "». Агент учтёт их в следующем сообщении.";
+            Log.Write("IMPORT", "Импорт из чата «" + label + "»: сообщений " + list.Count.ToString()
+                + "; в запрос пойдёт " + importContext.Length.ToString() + " символов.");
+            input.Focus();
+        }
+
+        private static string NormalizeDir(string dir)
+        {
+            if (dir == null) return "";
+            return dir.TrimEnd('\\', '/');
+        }
+
+        private void LoadMessagesFile(string path)
+        {
+            List<MessageItem> list = ReadMessages(path);
+            for (int i = 0; i < list.Count; i++) AddMessage(list[i].Header, list[i].Body);
         }
 
         private void LoadLegacyHistory(string path)
@@ -689,7 +1012,7 @@ namespace OpenCodeChat
                 return;
             }
             DialogResult r = MessageBox.Show(this,
-                "Начать новый разговор? текущая переписка очистится.",
+                "Начать новый разговор? Переписка этой модели очистится, у других моделей свои чаты.",
                 "Новый разговор", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
             if (r != DialogResult.Yes) return;
             StartChat(false);
@@ -710,7 +1033,12 @@ namespace OpenCodeChat
 
         private void AddMessage(string header, string body)
         {
-            MessageItem m = new MessageItem(header, body, HeaderColorFor(header));
+            AddMessage(header, body, HeaderColorFor(header));
+        }
+
+        private void AddMessage(string header, string body, Color headerColor)
+        {
+            MessageItem m = new MessageItem(header, body, headerColor);
             messages.Add(m);
             transcript.Items.Add(m);
         }
@@ -1054,6 +1382,17 @@ namespace OpenCodeChat
                 e.SuppressKeyPress = true;
                 NewChat();
             }
+            else if (e.Control && e.KeyCode == Keys.I)
+            {
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                if (busy)
+                {
+                    statusLabel.Text = "Сейчас идёт ответ. Импорт — после ответа.";
+                    return;
+                }
+                ImportHistory();
+            }
             else if (e.Alt && e.KeyCode == Keys.F)
             {
                 e.Handled = true;
@@ -1215,6 +1554,14 @@ namespace OpenCodeChat
                 question = files.Count == 1
                     ? "Посмотри приложенный файл."
                     : "Посмотри приложенные файлы.";
+            }
+            if (importContext.Length > 0)
+            {
+                question = importContext + "\r\n\r\nМой вопрос: " + question;
+                Log.Write("IMPORT", "История из чата «" + importSource + "» добавлена в запрос: "
+                    + importContext.Length.ToString() + " символов.");
+                importContext = "";
+                importSource = "";
             }
             Thread t = new Thread(delegate() { RunAgentPrepared(question, model, files, before, gguf); });
             t.IsBackground = true;
@@ -1957,6 +2304,7 @@ namespace OpenCodeChat
             ModelItem cur = modelBox.SelectedItem as ModelItem;
             if (cur != null) keep = KeyOf(cur);
             if (keep.Length == 0) keep = preferredModel;
+            if (keep.Length == 0) keep = currentModelKey;
 
             List<string> mine = new List<string>();
             List<string> others = new List<string>();
@@ -1978,6 +2326,7 @@ namespace OpenCodeChat
 
             List<string> ggufs = LoadOfflinePaths();
 
+            suppressModelSwitch = true;
             modelBox.Items.Clear();
             for (int i = 0; i < ggufs.Count; i++)
             {
@@ -2027,6 +2376,7 @@ namespace OpenCodeChat
                 if (index < 0) index = 0;
             }
             if (modelBox.Items.Count > 0) modelBox.SelectedIndex = index;
+            suppressModelSwitch = false;
 
             StringBuilder desc = new StringBuilder();
             if (ggufs.Count > 0)
@@ -2035,8 +2385,12 @@ namespace OpenCodeChat
                 desc.Append("Раздел «Мой профиль» — модели вашего аккаунта DeepSeek (" + mine.Count.ToString() + "). ");
             if (others.Count > 0)
                 desc.Append("Раздел «" + serviceLabel + "» — модели другого сервиса (" + others.Count.ToString() + "). ");
-            desc.Append("Ниже бесплатные модели. Кнопка «Добавить модель» добавляет файл .gguf.");
+            desc.Append("Ниже бесплатные модели. Кнопка «Добавить модель» добавляет файл .gguf. "
+                + "У каждой модели свой чат: при смене модели открывается её переписка. "
+                + "Ctrl+I — импорт истории из чата другой модели.");
             modelBox.AccessibleDescription = desc.ToString();
+
+            AlignChatToSelection(true);
         }
 
         // ---------- офлайн-модели (.gguf через llama.cpp) ----------
@@ -3012,6 +3366,100 @@ namespace OpenCodeChat
             if (bytes < 1024) return bytes.ToString() + " Б";
             if (bytes < 1024L * 1024L) return (bytes / 1024).ToString() + " КБ";
             return (bytes / (1024L * 1024L)).ToString() + " МБ";
+        }
+    }
+
+    internal sealed class ImportItem
+    {
+        private readonly string label;
+        private readonly int count;
+
+        public ImportItem(string label, int count)
+        {
+            this.label = label == null ? "" : label;
+            this.count = count;
+        }
+
+        public override string ToString()
+        {
+            return label + " — сообщений: " + count.ToString();
+        }
+    }
+
+    internal sealed class ImportForm : Form
+    {
+        private ListBox list;
+        private int selected = -1;
+
+        public int SelectedIndex
+        {
+            get { return selected; }
+        }
+
+        public ImportForm(List<ModelItem> models, List<int> counts)
+        {
+            Text = "Импорт истории";
+            StartPosition = FormStartPosition.CenterParent;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            ShowInTaskbar = false;
+            ClientSize = new Size(660, 430);
+            Font = new Font("Segoe UI", 10f);
+
+            Label intro = new Label();
+            intro.Text = "Выберите чат другой модели. Его сообщения добавятся в текущий чат, "
+                + "и агент учтёт их в следующем ответе.";
+            intro.Location = new Point(14, 12);
+            intro.Size = new Size(632, 46);
+            intro.AccessibleName = "Описание";
+            Controls.Add(intro);
+
+            list = new ListBox();
+            list.Location = new Point(14, 64);
+            list.Size = new Size(632, 280);
+            list.IntegralHeight = false;
+            list.AccessibleName = "Чаты других моделей";
+            list.AccessibleDescription = "Список моделей с историей. Выберите строку стрелками и нажмите «Импортировать».";
+            for (int i = 0; i < models.Count; i++)
+            {
+                list.Items.Add(new ImportItem(models[i].ToString(), counts[i]));
+            }
+            if (list.Items.Count > 0) list.SelectedIndex = 0;
+            list.DoubleClick += delegate
+            {
+                selected = list.SelectedIndex;
+                if (selected >= 0) DialogResult = DialogResult.OK;
+            };
+            Controls.Add(list);
+
+            Button ok = new Button();
+            ok.Text = "&Импортировать";
+            ok.Location = new Point(14, 356);
+            ok.Size = new Size(170, 32);
+            ok.AccessibleName = "Импортировать историю выбранного чата";
+            ok.AccessibleDescription = "Добавляет сообщения выбранного чата в текущий чат";
+            ok.Click += delegate
+            {
+                selected = list.SelectedIndex;
+                DialogResult = DialogResult.OK;
+            };
+            Controls.Add(ok);
+            AcceptButton = ok;
+
+            Button cancel = new Button();
+            cancel.Text = "От&мена";
+            cancel.Location = new Point(194, 356);
+            cancel.Size = new Size(140, 32);
+            cancel.DialogResult = DialogResult.Cancel;
+            Controls.Add(cancel);
+            CancelButton = cancel;
+
+            Label hint = new Label();
+            hint.Text = "Enter — импортировать, Esc — отмена.";
+            hint.Location = new Point(350, 362);
+            hint.Size = new Size(296, 22);
+            Controls.Add(hint);
         }
     }
 
