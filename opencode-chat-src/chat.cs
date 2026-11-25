@@ -149,7 +149,7 @@ namespace OpenCodeChat
         // Версия программы. Сравнивается с номером в теге релиза
         // slonobass-agent-N на GitHub, чтобы кнопка «Обновить программу»
         // знала, есть ли что скачивать.
-        internal const int AppVersion = 13;
+        internal const int AppVersion = 14;
         private const string ReleasesApi =
             "https://api.github.com/repos/magiyastraha-tech/sandfly-scripts/releases?per_page=20";
 
@@ -2193,7 +2193,7 @@ namespace OpenCodeChat
                     sb.AppendLine("      \"name\": \"" + JsonEscape(Service.Label) + "\",");
                     sb.AppendLine("      \"api\": \"" + JsonEscape(baseUrl) + "\",");
                     sb.AppendLine("      \"options\": { \"baseURL\": \"" + JsonEscape(baseUrl)
-                        + "\", \"apiKey\": \"${env:POLZA_API_KEY}\" },");
+                        + "\", \"apiKey\": \"{env:POLZA_API_KEY}\" },");
                     sb.AppendLine("      \"models\": {");
                     string[] ids = Service.Models;
                     for (int i = 0; i < ids.Length; i++)
