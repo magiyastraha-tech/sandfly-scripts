@@ -149,7 +149,7 @@ namespace OpenCodeChat
         // Версия программы. Сравнивается с номером в теге релиза
         // slonobass-agent-N на GitHub, чтобы кнопка «Обновить программу»
         // знала, есть ли что скачивать.
-        internal const int AppVersion = 14;
+        internal const int AppVersion = 15;
         private const string ReleasesApi =
             "https://api.github.com/repos/magiyastraha-tech/sandfly-scripts/releases?per_page=20";
 
@@ -2372,11 +2372,12 @@ namespace OpenCodeChat
             {
                 int latest = 0;
                 string zipUrl = null;
+                string exeUrl = null;
                 string error = null;
                 try
                 {
                     string json = FetchReleaseList();
-                    FindLatestRelease(json, out latest, out zipUrl);
+                    FindLatestRelease(json, out latest, out zipUrl, out exeUrl);
                     if (latest == 0) error = "на сервере не нашлось файла обновления.";
                 }
                 catch (Exception ex)
@@ -2386,7 +2387,7 @@ namespace OpenCodeChat
                 }
                 try
                 {
-                    BeginInvoke(new Action(delegate() { AfterUpdateCheck(latest, zipUrl, error); }));
+                    BeginInvoke(new Action(delegate() { AfterUpdateCheck(latest, zipUrl, exeUrl, error); }));
                 }
                 catch
                 {
@@ -2396,7 +2397,7 @@ namespace OpenCodeChat
             t.Start();
         }
 
-        private void AfterUpdateCheck(int latest, string zipUrl, string error)
+        private void AfterUpdateCheck(int latest, string zipUrl, string exeUrl, string error)
         {
             if (error != null)
             {
@@ -2425,12 +2426,12 @@ namespace OpenCodeChat
                 return;
             }
             statusLabel.Text = "Скачиваю обновление…";
-            Thread t = new Thread(delegate() { DownloadAndApply(zipUrl, latest); });
+            Thread t = new Thread(delegate() { DownloadAndApply(exeUrl, zipUrl, latest); });
             t.IsBackground = true;
             t.Start();
         }
 
-        private void DownloadAndApply(string zipUrl, int version)
+        private void DownloadAndApply(string exeUrl, string zipUrl, int version)
         {
             string error = null;
             try
@@ -2445,12 +2446,38 @@ namespace OpenCodeChat
                 }
                 string staging = Path.Combine(folder, "new");
                 Directory.CreateDirectory(staging);
-                string zipPath = Path.Combine(folder, "update.zip");
-                DownloadTo(zipUrl, zipPath);
-                SetStatusSafe("Распаковываю обновление…");
-                ZipFile.ExtractToDirectory(zipPath, staging);
-                try { File.Delete(zipPath); } catch { }
-                Log.Write("UPDATE", "Обновление " + version.ToString() + " скачано и распаковано: " + staging);
+                // Сначала маленький файл программы: десятки килобайт вместо
+                // полутора сотен мегабайт — на слабом или фильтрующем
+                // подключении такой запрос проходит, а большой архив рвётся.
+                bool ready = false;
+                if (exeUrl != null)
+                {
+                    string exePath = Path.Combine(staging, "Slonobass-Agent.exe");
+                    try
+                    {
+                        DownloadTo(exeUrl, exePath);
+                        if (!LooksLikeExe(exePath))
+                            throw new IOException("скачанный файл программы повреждён.");
+                        ready = true;
+                        Log.Write("UPDATE", "Обновление " + version.ToString()
+                            + " скачано по короткому пути (только программа): " + exePath);
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Exception("Скачивание файла программы", ex);
+                        try { File.Delete(exePath); } catch { }
+                    }
+                }
+                if (!ready)
+                {
+                    if (zipUrl == null) throw new IOException("на сервере нет файла обновления.");
+                    string zipPath = Path.Combine(folder, "update.zip");
+                    DownloadTo(zipUrl, zipPath);
+                    SetStatusSafe("Распаковываю обновление…");
+                    ZipFile.ExtractToDirectory(zipPath, staging);
+                    try { File.Delete(zipPath); } catch { }
+                    Log.Write("UPDATE", "Обновление " + version.ToString() + " скачано и распаковано: " + staging);
+                }
             }
             catch (Exception ex)
             {
@@ -2540,10 +2567,11 @@ namespace OpenCodeChat
         // В ответе GitHub — список релизов, новые сверху. У каждого тег вида
         // slonobass-agent-N и рядом ссылка на zip. Берём самый большой номер,
         // у которого есть zip: порядок ответа может измениться.
-        private static void FindLatestRelease(string json, out int latest, out string zipUrl)
+        private static void FindLatestRelease(string json, out int latest, out string zipUrl, out string exeUrl)
         {
             latest = 0;
             zipUrl = null;
+            exeUrl = null;
             if (json == null) return;
             MatchCollection tags = Regex.Matches(json, "\"tag_name\"\\s*:\\s*\"slonobass-agent-(\\d+)\"");
             for (int i = 0; i < tags.Count; i++)
@@ -2553,21 +2581,73 @@ namespace OpenCodeChat
                 if (n <= latest) continue;
                 int start = tags[i].Index;
                 int end = i + 1 < tags.Count ? tags[i + 1].Index : json.Length;
-                Match zip = Regex.Match(json.Substring(start, end - start),
+                string block = json.Substring(start, end - start);
+                Match zip = Regex.Match(block,
                     "\"browser_download_url\"\\s*:\\s*\"([^\"]+)\\.zip\"");
                 if (!zip.Success) continue;
+                Match exe = Regex.Match(block,
+                    "\"browser_download_url\"\\s*:\\s*\"([^\"]+)\\.exe\"");
                 latest = n;
                 zipUrl = zip.Groups[1].Value.Replace("\\/", "/");
+                exeUrl = exe.Success ? exe.Groups[1].Value.Replace("\\/", "/") : null;
             }
         }
 
+        private static bool LooksLikeExe(string path)
+        {
+            try
+            {
+                FileInfo fi = new FileInfo(path);
+                if (fi.Length < 20000) return false;
+                using (FileStream s = File.OpenRead(path))
+                {
+                    int a = s.ReadByte();
+                    int b = s.ReadByte();
+                    return a == 'M' && b == 'Z';
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // Загрузка с повторами: соединение с сервером файлов иногда рвётся
+        // (фильтры сети, антивирус), и вторая попытка обычно проходит.
         private void DownloadTo(string url, string path)
         {
+            Exception last = null;
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                try
+                {
+                    // Первая попытка — как настроено в системе (вдруг у человека
+                    // свой прокси для таких сайтов), вторая — напрямую.
+                    DownloadOnce(url, path, attempt == 1);
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    last = ex;
+                    try { if (File.Exists(path)) File.Delete(path); } catch { }
+                    Log.Write("UPDATE", "Попытка " + (attempt + 1).ToString() + " не удалась: " + ex.Message);
+                    if (attempt + 1 < 3)
+                    {
+                        SetStatusSafe("Скачиваю обновление… повтор " + (attempt + 2).ToString() + " из 3");
+                        Thread.Sleep(2000);
+                    }
+                }
+            }
+            throw last;
+        }
+
+        private void DownloadOnce(string url, string path, bool noProxy)
+        {
             HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
-            req.Proxy = null;
+            if (noProxy) req.Proxy = null;
             req.UserAgent = "SlonobassAgent/" + AppVersion.ToString();
             req.Timeout = 30000;
-            req.ReadWriteTimeout = 60000;
+            req.ReadWriteTimeout = 120000;
             req.KeepAlive = false;
             using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
             using (Stream input = resp.GetResponseStream())
@@ -2592,6 +2672,8 @@ namespace OpenCodeChat
                         }
                     }
                 }
+                if (total > 0 && done != total)
+                    throw new IOException("файл скачан не полностью (" + done.ToString() + " из " + total.ToString() + " байт).");
             }
         }
 
@@ -4093,6 +4175,16 @@ namespace OpenCodeChat
         {
             Note("Начало обновления. Источник: " + sourceRoot + "; установка: " + installDir);
             WaitForParent(pidText);
+            try
+            {
+                // Копия прошлой версии программы — на случай, если новая
+                // не запустится: файл можно вернуть вручную.
+                string current = Path.Combine(installDir, "Slonobass-Agent.exe");
+                if (File.Exists(current)) File.Copy(current, current + ".old", true);
+            }
+            catch
+            {
+            }
             try
             {
                 string source = sourceRoot;
