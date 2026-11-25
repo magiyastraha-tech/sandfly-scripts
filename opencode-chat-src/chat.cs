@@ -149,7 +149,7 @@ namespace OpenCodeChat
         // Версия программы. Сравнивается с номером в теге релиза
         // slonobass-agent-N на GitHub, чтобы кнопка «Обновить программу»
         // знала, есть ли что скачивать.
-        internal const int AppVersion = 15;
+        internal const int AppVersion = 16;
         private const string ReleasesApi =
             "https://api.github.com/repos/magiyastraha-tech/sandfly-scripts/releases?per_page=20";
 
@@ -218,7 +218,7 @@ namespace OpenCodeChat
 
         private void BuildUi()
         {
-            Text = "Slonobass agent";
+            Text = "Slonobass agent " + AppVersion.ToString();
             StartPosition = FormStartPosition.CenterScreen;
             KeyPreview = true;
             ClientSize = new Size(980, 740);
@@ -1336,11 +1336,22 @@ namespace OpenCodeChat
                                     lock (eb)
                                     {
                                         eb.AppendLine("OpenCode: " + em);
+                                        // Код ответа лежит в сырой строке события, а не в
+                                        // message: искать 401 надо по всей строке.
                                         if (em.IndexOf("Authentication Fails", StringComparison.OrdinalIgnoreCase) >= 0
                                             || em.IndexOf("invalid api key", StringComparison.OrdinalIgnoreCase) >= 0
-                                            || em.IndexOf("status\":401", StringComparison.Ordinal) >= 0)
+                                            || line.IndexOf("\"status\":401", StringComparison.Ordinal) >= 0
+                                            || line.IndexOf("UNAUTHORIZED", StringComparison.Ordinal) >= 0)
                                         {
-                                            eb.AppendLine("Похоже, ключ DeepSeek неверный или истёк. Откройте «Мой профиль…» и проверьте ключ.");
+                                            if (Service.HasProfile)
+                                            {
+                                                eb.AppendLine("Сервис " + Service.Label
+                                                    + " отклонил ключ (код 401). Создайте новый ключ на сайте сервиса и введите его в настройках программы.");
+                                            }
+                                            else
+                                            {
+                                                eb.AppendLine("Похоже, ключ DeepSeek неверный или истёк. Откройте «Мой профиль…» и проверьте ключ.");
+                                            }
                                         }
                                         else if (em.IndexOf("insufficient", StringComparison.OrdinalIgnoreCase) >= 0
                                             || em.IndexOf("balance", StringComparison.OrdinalIgnoreCase) >= 0)
@@ -1905,6 +1916,21 @@ namespace OpenCodeChat
                 }
                 catch
                 {
+                }
+                if (Service.HasProfile)
+                {
+                    // Проверка ключа сразу при запуске: без неё 401 всплывает
+                    // только в момент первого сообщения и выглядит загадочно.
+                    string probe = Service.ProbeKey(Service.BaseUrl, Service.Key,
+                        Service.Models.Length > 0 ? Service.Models[0] : "");
+                    if (probe.Length == 0)
+                    {
+                        Log.Write("SERVICE", "Ключ " + Service.Label + " принят сервисом");
+                    }
+                    else
+                    {
+                        Log.Write("SERVICE", "Ключ " + Service.Label + " не принят: " + probe);
+                    }
                 }
             });
             t.IsBackground = true;
@@ -3192,6 +3218,80 @@ namespace OpenCodeChat
             if (k.Length > 0) psi.EnvironmentVariables["POLZA_API_KEY"] = k;
         }
 
+        // Проверка ключа настоящим запросом к модели. Список моделей у многих
+        // сервисов открыт и без ключа: 200 на /models ничего не доказывает,
+        // ключ отсекается только на /chat/completions. Возвращает пустую
+        // строку, если ключ принят, иначе — причину простыми словами.
+        public static string ProbeKey(string url, string apiKey, string model)
+        {
+            if (url == null || url.Length == 0 || apiKey == null || apiKey.Length == 0)
+                return "";
+            if (model == null || model.Length == 0) model = "test";
+            try
+            {
+                ServicePointManager.SecurityProtocol = ServicePointManager.SecurityProtocol
+                    | SecurityProtocolType.Tls12;
+            }
+            catch
+            {
+            }
+            try
+            {
+                HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url.TrimEnd('/') + "/chat/completions");
+                req.Proxy = null;
+                req.Method = "POST";
+                req.ContentType = "application/json";
+                req.Timeout = 30000;
+                req.ReadWriteTimeout = 30000;
+                req.KeepAlive = false;
+                req.UserAgent = "SlonobassAgent";
+                req.Headers["Authorization"] = "Bearer " + apiKey;
+                string body = "{\"model\":" + Quote(model)
+                    + ",\"max_tokens\":1,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}";
+                byte[] data = Encoding.UTF8.GetBytes(body);
+                req.ContentLength = data.Length;
+                using (Stream s = req.GetRequestStream()) s.Write(data, 0, data.Length);
+                using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
+                {
+                    int code = (int)resp.StatusCode;
+                    return code >= 200 && code < 300 ? "" : "сервис ответил кодом " + code.ToString();
+                }
+            }
+            catch (WebException ex)
+            {
+                HttpWebResponse resp = ex.Response as HttpWebResponse;
+                if (resp == null) return "нет связи с сервисом: " + ex.Message;
+                int code = (int)resp.StatusCode;
+                if (code == 401 || code == 403)
+                    return "сервис отклонил ключ (код " + code.ToString() + ")";
+                if (code == 402)
+                    return "на балансе сервиса нет средств (код 402)";
+                string detail = "";
+                try
+                {
+                    using (StreamReader r = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
+                        detail = r.ReadToEnd();
+                }
+                catch
+                {
+                }
+                detail = detail.Trim();
+                if (detail.Length > 200) detail = detail.Substring(0, 200) + "…";
+                return "сервис ответил кодом " + code.ToString()
+                    + (detail.Length > 0 ? ": " + detail : "");
+            }
+            catch (Exception ex)
+            {
+                return "не удалось проверить ключ: " + ex.Message;
+            }
+        }
+
+        private static string Quote(string s)
+        {
+            if (s == null) return "\"\"";
+            return "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+        }
+
         private static void Load()
         {
             if (loaded) return;
@@ -3654,9 +3754,16 @@ namespace OpenCodeChat
                 {
                     err = Describe(ex);
                 }
+                string probe = null;
+                if (err == null && found.Count > 0)
+                {
+                    // Список моделей открыт без ключа, поэтому ключ проверяем
+                    // отдельным коротким запросом к выбранной модели.
+                    probe = Service.ProbeKey(url, k, found[0]);
+                }
                 try
                 {
-                    BeginInvoke(new Action(delegate { AfterCheck(found, err); }));
+                    BeginInvoke(new Action(delegate { AfterCheck(found, err, probe); }));
                 }
                 catch
                 {
@@ -3666,7 +3773,7 @@ namespace OpenCodeChat
             t.Start();
         }
 
-        private void AfterCheck(List<string> found, string err)
+        private void AfterCheck(List<string> found, string err, string probe)
         {
             checkBtn.Enabled = true;
             saveBtn.Enabled = true;
@@ -3694,6 +3801,15 @@ namespace OpenCodeChat
             {
                 bool check = previous.Count == 0 || previous.Contains(found[i]);
                 modelsList.Items.Add(found[i], check);
+            }
+            if (probe != null && probe.Length > 0)
+            {
+                stateLabel.Text = "Модели получены (" + found.Count.ToString()
+                    + "), но ключ не работает: " + probe + ".";
+                if (fetchLabel != null) fetchLabel.Text = probe.IndexOf("отклонил ключ", StringComparison.Ordinal) >= 0
+                    ? "Список моделей у сервиса открыт без ключа, поэтому модели видны и с неверным ключом. Создайте новый ключ на сайте сервиса и введите его здесь."
+                    : "Можно сохранить, но запросы могут не проходить.";
+                return;
             }
             stateLabel.Text = "Ключ принят. Найдено моделей: " + found.Count.ToString() + ".";
             if (fetchLabel != null) fetchLabel.Text = "Отметьте нужные модели и нажмите «Сохранить».";
@@ -3837,7 +3953,8 @@ namespace OpenCodeChat
                     current = null;
                 }
             }
-            Write("START", "Программа запущена. Папка программы: " + baseDir);
+            Write("START", "Программа запущена. Версия " + ChatForm.AppVersion.ToString()
+                + ". Папка программы: " + baseDir);
             Write("START", "Windows: " + Environment.OSVersion.VersionString
                 + "; .NET: " + Environment.Version.ToString()
                 + "; 64-bit: " + Environment.Is64BitProcess.ToString());
