@@ -393,6 +393,12 @@ id `wam.google-play-updates-focus`.
 «ВПН: включить или отключить», «ВПН: сообщить состояние» и «ВПН: перейти к
 выбору сервера».
 
+**Slonobass AntennaPod** — для AntennaPod (de.danoeh.antennapod), id `wam.antennapod-first-episode`.
+
+При открытии приложения фокус сам встаёт на первый выпуск в списке новостей на вкладке «Выпуски»: дальше можно сразу идти по выпускам свайпом вправо. На других вкладках («Подписки», «Очередь», «Загрузки»), в поиске, в карточке выпуска и в проигрывателе фокус не трогает — работает только на вкладке «Выпуски». Кнопки «Отметить как прочитанное» и «Отметить как проигранное» на строке выпуска убраны из свайпа (включая запасной поиск по фрагментам текста для любых локализаций): обход идёт только по выпускам. Сама кнопка остаётся в дереве — нажать её вручную по-прежнему можно.
+
+В настройках скрипта переключатели «Фокус на первый выпуск» и «Скрывать кнопку отметки». В меню команд — «Перейти к первому выпуску».
+
 **Slonobass v2RayTun** — для v2RayTun (com.v2raytun.android), id `v2raytun-vpn`.
 
 Главный экран приведён к одному действию. Переключатель ВПН — там он был
@@ -422,7 +428,7 @@ HYSTERIA2». В меню действий строки — «Подключит�
 
 SandFly версии не ниже 2. wam.google-messages-actions проверен на API 1,
 wam.tele2-summary — на API 3, ymusic.video_rows и wam.translator — на API 4,
-wam.nekogram-actions, samsung-email-delete-action,
+wam.antennapod-first-episode, wam.nekogram-actions, samsung-email-delete-action,
 wam.google-play-updates-focus, filemanager-select, cyberportal-vpn,
 v2raytun-vpn, wam.max-actions и wam.teamtalk-first-server — на API 5.
 wam.samsung-call-log-actions написан под API 2: без него остаётся только
