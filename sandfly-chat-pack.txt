@@ -7,6 +7,10 @@ SANDFLY. НАБОР ДЛЯ НАПИСАНИЯ СКРИПТОВ В ЛЮБОМ Ч�
 Если чат обрезает длинный текст, вставляй частями по разделам, но первым
 всегда идёт раздел «ПРАВИЛА ДЛЯ МОДЕЛИ», затем справочник API.
 
+Справочник в разделе 2 сверен с официальным docs/scripting.md (API v6):
+github.com/aaron-gh/SandFly. Если этот файл расходится с официальным —
+прав официальный.
+
 ================================================================
 РАЗДЕЛ 1. ПРАВИЛА ДЛЯ МОДЕЛИ
 ================================================================
@@ -35,6 +39,9 @@ SANDFLY. НАБОР ДЛЯ НАПИСАНИЯ СКРИПТОВ В ЛЮБОМ Ч�
 7. Элементы ищи по нескольким признакам сразу: id, text, contentDescription,
    className, внутри известного контейнера. Один id может исчезнуть в новой
    сборке приложения, поэтому у важного поиска должен быть запасной путь.
+   Поля запросов пиши строго как в справочнике: часть текста ИЛИ описания —
+   это textContains; поля contentDescriptionContains в API НЕТ (запрос или
+   правило с ним отвергается).
 8. Хуки onFocus и onSpeech должны отвечать за 30 мс и не могут ждать.
    Всё, что ждёт (waitFor, sleep, повторные попытки), запускай через
    sf.run(function() ... end) или sf.setTimeout.
@@ -48,6 +55,9 @@ SANDFLY. НАБОР ДЛЯ НАПИСАНИЯ СКРИПТОВ В ЛЮБОМ Ч�
     или структура экрана), задай ровно один короткий вопрос и предложи,
     как эти данные получить: в SandFly есть вывод дерева экрана, его можно
     скопировать в чат.
+12. В manifest и запросах допустимы только поля из справочника. Неизвестное
+    поле правила, запроса, действия или навигации SandFly отвергает и пишет
+    причину. Сомневаешься — бери официальный docs/scripting.md, не додумывай.
 
 ================================================================
 РАЗДЕЛ 2. СПРАВОЧНИК API SANDFLY (версия API 6, Lua 5.4)
@@ -55,7 +65,8 @@ SANDFLY. НАБОР ДЛЯ НАПИСАНИЯ СКРИПТОВ В ЛЮБОМ Ч�
 
 # SandFly scripts — compact API reference (API version 6, Lua 5.4)
 
-Official full text: `docs/01-official-writing-sandfly-scripts.md`.
+Official full text: github.com/aaron-gh/SandFly -> docs/scripting.md (API v6).
+Examples: docs/scripting/examples. This pack is a condensed, verified subset.
 
 A script is one file `main.lua` (up to 1 MB). It must start with a manifest table
 that holds only plain values (text, numbers, true/false, tables):
@@ -81,7 +92,11 @@ local manifest = {
 ```
 
 No `io`, `debug`, `package`, no file access. Only `sf`, `string`, `table`, `math`,
-`utf8`, `coroutine`, `os.time/clock/date/difftime`, `json`, `require`.
+`utf8`, `coroutine`, `os.time/clock/date/difftime`, `json`, `require`, `print`.
+
+Other manifest fields: `homepage`, `rules`, `navigation`, `onDemand` (script
+loaded only to run a command; commands may have only id and title),
+`keepLoaded` (stay loaded with the screen off; for scripts without `apps`).
 
 ## Permissions
 
@@ -100,8 +115,7 @@ use `sf.storage`). No `apps` = runs in every app while on.
 ## Queries
 
 `sf.screen.find(query)`, `sf.screen.findAll(query, limit)`, `item:find(query)`,
-`sf.screen.waitFor(query, timeoutMs, intervalMs)`.
-
+`item:findAll(query, limit)`, `sf.screen.waitFor(query, timeoutMs, intervalMs)`.
 Query is an id string, or a record of: `id`, `text`, `textContains`,
 `contentDescription`, `className` (end of class name), `role`, `clickable`,
 `parentId`, `inside` (query on an ancestor), `has` (query on a descendant),
@@ -109,10 +123,20 @@ Query is an id string, or a record of: `id`, `text`, `textContains`,
 `scrollable`, `visible`, `heading`, `checked`, `checkable`, `password`,
 `hint`, `stateDescription`, `contains`, `matches` (regex), `field`, `kind`.
 
+- `textContains` — часть текста ИЛИ contentDescription, без учёта регистра.
+- `contains` / `matches` — по тексту, описанию, подсказке, состоянию или
+  tooltip; `field` сужает до одного: `'text'`, `'contentDescription'`
+  (или `'description'`), `'hint'`, `'stateDescription'`, `'tooltip'`, `'id'`.
+- `kind` — тип макроса: `'clickable'`, `'scrollable'`, `'editable'`,
+  `'adjustable'`, `'checkable'`, `'checked'`, `'selected'`, `'heading'`.
+- ПОЛЯ `contentDescriptionContains` НЕТ. Часть описания:
+  `{ contains = 'текст', field = 'description' }` или `{ textContains = 'текст' }`.
+
 ```lua
 local list = sf.screen.waitFor({ id = 'servers_recycler_view' }, 8000, 300)
 local row  = sf.screen.find({ className = 'Button', inside = { id = 'toolbar' } })
 local any  = sf.screen.find({ textContains = 'НОВЫЙ СЕРВЕР' })
+local btn  = sf.screen.find({ id = 'secondaryActionButton', textContains = 'прочитан' })
 ```
 
 ## Items
@@ -133,58 +157,87 @@ An item is a snapshot: call `item:refresh()` after the screen changes.
 ## Hooks
 
 ```lua
-sf.onAppEnter(function(info) end)   -- info = { package, activity, window }
+sf.onAppEnter(function(info) end)     -- info = { package, activity, window, meta }
 sf.onAppLeave(function(info) end)
 sf.onWindowChange(function(info) end)
-sf.onContentChange(function(info) end)
+sf.onContentChange(function(info) end)    -- info = { package, node, changeTypes }
+sf.onScroll(function(info) end)           -- { from, to, count, deltaX, deltaY, ... }
 sf.onFocus(function(item, text) end)
 sf.onSpeech(function(text) end)
+sf.onNotification(function(n, text) end)  -- n = { package, toast, title, text, category }
+sf.onAnnouncement(function(a, text) end)  -- a = { package, text }
+sf.onTextChange(function(e) end)          -- { text, before, from, added, removed, ... }
+sf.onSelectionChange(function(e) end)
+sf.onClick(function(e) end); sf.onLongClick(function(e) end)
+sf.onInputFocus(function(e) end)
+sf.onButton(function(key) end)            -- button setting pressed
+sf.onSettingChange(function(key, value) end)
+sf.onActions(function(item) return { { title = '...', first = true, run = function() ... end } } end)
 sf.onCommand('command_id', function(event) end)  -- event.node, event.via, event.direction
 ```
 
-Speech hooks (`onFocus`, `onSpeech`, `onNotification`, `onAnnouncement`) return
-text, `{speak=text}`, `{before=,after=}`, `false` or `{silent=true}`.
-They must answer in 30 ms and cannot wait. Elsewhere a call that waits is fine;
-in a non-waiting hook use `sf.run(function() ... end)`.
+A hook returns a function that removes it: `local stop = sf.onFocus(fn); stop()`.
 
-## Speech, sound
+Speech hooks (`onFocus`, `onSpeech`, `onNotification`, `onAnnouncement`) return
+text, `{speak=text}`, `{before=,after=}`, `false` or `{silent=true}`. They must
+answer in 30 ms and cannot wait. `onActions` must answer in 50 ms and cannot
+wait; its `run` functions are tasks and may wait. Elsewhere a waiting call is
+fine; in a non-waiting hook use `sf.run(function() ... end)`.
+
+## Speech, sound, vibration
 
 `sf.speak(text, {interrupt, rate, pitch, language, wait})`, `sf.message(text)`,
 `sf.speech.stop()`, `sf.speech.isSpeaking()`, `sf.speech.last()`,
-`sf.playSound('focus'|'click'|'actionable'|'end'|'beep'|...)`,
-`sf.playTone(hz, ms)`, `sf.vibrate(ms_or_list)`.
+`sf.braille.show(text)`, `sf.playSound('focus'|'click'|'actionable'|'scroll'|'end'|'beep'|...)`,
+`sf.playTone(hz, ms, {volume})`, `sf.playAudio(samples, {sampleRate, volume})`,
+`sf.vibrate(ms_or_list)`, `sf.feedback.mute({speech, sounds, vibration}, ms)` -> handle,
+`sf.feedback.unmute()`.
 
 ## Screen, app
 
-`sf.screen.focused()`, `sf.screen.root()`, `sf.screen.find`, `findAll`,
-`sf.screen.inputFocused()`, `sf.screen.at(x,y)`, `sf.screen.windows()`,
-`sf.screen.waitFor`, `sf.screen.click(q)`, `sf.app()` → `{package,label,activity,window,meta}`.
+`sf.screen.focused()`, `sf.screen.inputFocused()`, `sf.screen.root()`,
+`sf.screen.find`, `sf.screen.findAll`, `sf.screen.waitFor`,
+`sf.screen.at(x, y)`, `sf.screen.windows()` (each `{ id, type, title, active, root, ... }`),
+`sf.screen.click(q)`, `sf.screen.recognizeText()` -> `{ text, blocks }`,
+`sf.app()` -> `{ package, label, activity, window, meta }`.
+There is NO `sf.screen.tree` or `sf.screen.items`: build a tree with
+`sf.screen.root()`, `item:children()`, `item:child(i)`, `item:parent()`.
 
 ## Touch, keys
 
-`sf.touch.tap(x,y)`, `doubleTap`, `longPress(x,y,ms)`, `swipe(x1,y1,x2,y2,ms)`;
-`sf.keys.type(text)`, `sf.keys.press('enter tab down ...')` (needs Shizuku).
+`sf.touch.tap(x, y)`, `doubleTap(x, y)`, `longPress(x, y, ms)`,
+`swipe(x1, y1, x2, y2, ms)`, `gesture(strokes)`, `lock(ms)` / `unlock()`;
+`sf.keys.type(text)`, `sf.keys.press('enter tab down ...')` (needs Shizuku),
+`sf.keys.passAll(on)`.
 
 ## Storage, settings, timers
 
-`sf.storage.get/set/remove/keys/clear`; `sf.settings.get/all/set`;
+`sf.storage.get/set/remove/keys/clear`; `sf.settings.get/all/set`,
+`sf.settings.setOptions/setTitle/setSummary`;
 `sf.setTimeout(fn, ms)`, `sf.setInterval(fn, ms)`, `sf.clearTimer(id)`,
-`sf.sleep(ms)`, `sf.run(fn, ...)`, `sf.clock()`.
+`sf.sleep(ms)`, `sf.run(fn, ...)`, `sf.clock()`, `print(...)`, `sf.log(...)`.
 
-## Dialogs
+## Dialogs and windows (need `dialogs`)
 
-`sf.ui.alert(msg, {title})`, `sf.ui.confirm(msg)` → boolean,
-`sf.ui.prompt(title)`, `sf.ui.choose(title, options)`,
-`sf.ui.dialog({title, items, onClose})`, `sf.ui.window(...)`, `sf.ui.text(title, text)`.
-Need `dialogs`.
+`sf.ui.alert(msg, {title})`, `sf.ui.confirm(msg, {title, ok, cancel})` -> boolean,
+`sf.ui.prompt(title, {text, hint})` -> text or nil,
+`sf.ui.choose(title, choices, {selected})`, `sf.ui.text(title, text)`,
+`sf.ui.dialog(form)`, `sf.ui.window(form)`.
+Form = `{ title, items, onClose }`; item types: `label`, `heading`, `edit`,
+`switch`, `list`, `items`, `slider`, `button`. Form methods:
+`form:get/values/set/close/wait/add/remove/focus/setTitle`.
 
 ## System, clipboard, network, device
 
-`sf.clipboard.get/set`; `sf.system.back/home/recents/notifications/openApp/openUrl/share/openSettings`,
-`sf.system.startActivity(intent)`; `sf.fetch(url, {method, headers, body, timeout})`
-→ `{status, ok, body, json()}`; `sf.translate(text, {from,to})`;
-`sf.device.info/battery/network/volume/setVolume/ringerMode/get/set`;
-`sf.commands.run('NEXT')`, `sf.commands.list()`.
+`sf.clipboard.get/set` (clipboard).
+`sf.system.back/home/recents/notifications/quickSettings/powerDialog/lockScreen/
+takeScreenshot/allApps/openApp/openUrl/share/openSettings`, `startActivity`,
+`sendBroadcast`, `setTimer`, `setAlarm`, `call`, `message`, `camera` (system).
+`sf.fetch(url, {method, headers, body, timeout})` -> `{status, ok, body, json(), text()}`
+(network); `sf.translate(text, {from, to})`.
+`sf.device.info/battery/network/volume/ringerMode`, `setVolume`, `setRingerMode`,
+`media(key)`, `controls/get/set(name, value)` (writes need `system`).
+`sf.commands.run('NEXT')`, `sf.commands.list()`; `sf.macros.run(file, values)`, `sf.macros.stop()`.
 
 ## Rules (no code, cheapest way to fix an app)
 
@@ -196,11 +249,18 @@ rules = {
 }
 ```
 
-Rule fields: `id`, `match`, `window`, `activity`, `label`, `speak`, `hide`,
-`silence`, `role`, `state`, `hint`, `heading`, `group`, `readBefore`, `readAfter`,
-`actions`, `read`, `buttonActions`, `skipButtons`, `activate`, `liftToActivate`,
-`longPressAfter`, `touchToActivate`.
-Rules from code: `sf.rules.add(rule)` → number, `sf.rules.remove(n)`, `sf.rules.clear()`.
+Rule fields: `id`, `match`, `window`, `activity`, `label`, `speak`, `hide`
+(true or 'all'), `silence` (true or 'all'), `role`, `state`, `hint`, `heading`,
+`group`, `readBefore`, `readAfter`, `read`, `activate`, `liftToActivate`,
+`longPressAfter`, `touchToActivate`, `actions`, `buttonActions`, `skipButtons`.
+`read` (up to 12 parts): `{ path = {2,1} }`, `{ from = query }`, `{ from = {} }`
+(own text), with `before` and `fromAbove`. `actions` (up to 10):
+`{ title, click|longClick|touchHold|focus|scrollForward|scrollBackward = q }`,
+`{ title, speak = text }`, `{ title, speak = { textOf = q } }`, or
+`{ title, steps = {...} }`.
+In `match` use `textContains` or `contains`+`field`; `contentDescriptionContains` does not exist.
+Rules from code: `sf.rules.add(rule)` -> number (up to 200), `sf.rules.remove(n)`,
+`sf.rules.clear()`.
 
 ## Commands and navigation
 
@@ -218,16 +278,26 @@ commands = {
 
 ## Limits
 
-2 s per call, 32 MB memory; 500 items kept; screen search up to 3000 items,
-returns up to 200; 500 rules, 50 commands; script turned off after 5 errors in a minute.
-Text for speech is cut at 20 000 characters.
+2 s per call (speech hooks share 30 ms; `onActions` 50 ms to answer); 32 MB memory.
+Script is turned off after 5 errors in a minute or 3 timeouts in 5 minutes; one
+call holding all scripts > 20 s also turns it off.
+A script keeps the last 500 items; screen search scans up to 3000 items and
+returns at most 200. Manifest: up to 500 rules (100 with `match`), 50 commands,
+20 navigation entries. At runtime: up to 200 added rules, 100 timers, 8 requests,
+8 dialogs/windows. Text limits: speech/dialogs 20 000, braille 1 000, log 4 000,
+`sf.text` 10 000; storage 524 288 chars. `.lua` up to 1 MB; `.zip` up to 5 MB,
+5 MB unpacked, 200 files.
 
-## Saving and installing
+## Saving, installing, publishing
 
-- Save as `.lua` (UTF-8). In SandFly: **Apps → Scripts → Import script**.
-- If the manifest's `id` matches an installed script, importing updates it and
-  keeps its settings and stored data.
-- Errors are in the script's **Log** on its page.
+- Save as `.lua` (UTF-8) or a `.zip` with `main.lua`. Import: **Scripts -> Import script**.
+- Same `id` replaces the installed script; settings, storage and permission
+  choices are kept. Raise `version` with every change; it is compared number by
+  number, so `1.10` is newer than `1.9`.
+- Sources: put files in a public GitHub/GitLab/Codeberg/Gitea/Bitbucket repo;
+  users add `github.com/owner/repo` (or `/tree/main/folder`) in
+  **Scripts -> Script sources -> Add source**. SandFly checks once a day, by file name.
+- Errors are in the script's **Log** on its page (last 300 entries).
 ================================================================
 РАЗДЕЛ 3. СКЕЛЕТ СКРИПТА (отсюда начинается любой новый скрипт)
 ================================================================
@@ -311,7 +381,7 @@ local function focus_in_list(list)
     if not node then
       return false
     end
-    if node.uniqueId == list.uniqueId then
+    if node == list then
       return true
     end
     node = node:parent()
@@ -693,10 +763,12 @@ print('TeamTalk: фокус на первый сервер, версия 1.0 з�
    числа, true/false, вложенные таблицы. Никаких вызовов функций внутри.
 2. В manifest есть id, name, version, author, minApiVersion, testedApiVersion.
 3. Все функции, которые использует скрипт, есть в справочнике.
-4. Каждый важный поиск элемента имеет запасной путь.
-5. Всё, что ждёт дольше одного кадра, запущено через sf.run или sf.setTimeout.
-6. Есть переключатель в settings, если скрипт что-то меняет по своей воле.
-7. Скрипт можно выключить, не удаляя: переключатель в настройках.
+4. В правилах и запросах только поля из справочника; часть текста или
+   описания ищется через textContains (поля contentDescriptionContains нет).
+5. Каждый важный поиск элемента имеет запасной путь.
+6. Всё, что ждёт дольше одного кадра, запущено через sf.run или sf.setTimeout.
+7. Есть переключатель в settings, если скрипт что-то меняет по своей воле.
+8. Скрипт можно выключить, не удаляя: переключатель в настройках.
 
 Установка: сохранить файл с расширением .lua в кодировке UTF-8, затем в
 SandFly открыть Приложения, Скрипты, Импорт скрипта и выбрать файл.
