@@ -1,5 +1,9 @@
 -- Slonobass AntennaPod — скрипт для SandFly.
 --
+-- Версия 1.1: кнопка «Отметить как прочитанное» (и «Отметить как проигранное»)
+-- у строки выпуска убрана из свайпа: обход идёт только по выпускам. Сама
+-- кнопка остаётся в дереве экрана, поэтому нажать её вручную по-прежнему можно.
+--
 -- Версия 1.0: при открытии AntennaPod фокус встаёт на первый выпуск в списке
 -- новостей на вкладке «Выпуски». Дальше можно сразу идти по выпускам свайпом,
 -- не отыскивая список вручную.
@@ -13,17 +17,18 @@
 -- Строка выпуска содержит дату публикации (txtvPubDate): по ней скрипт и
 -- выбирает из списка настоящую строку выпуска, а не заголовок или кнопку.
 --
--- В настройках скрипта переключатель «Фокус на первый выпуск». В меню команд —
--- «Перейти к первому выпуску»: тот же переход вручную, если фокус уехал.
+-- В настройках скрипта переключатели «Фокус на первый выпуск» и «Скрывать
+-- кнопку отметки». В меню команд — «Перейти к первому выпуску»: тот же переход
+-- вручную, если фокус уехал.
 
 local manifest = {
   id = 'wam.antennapod-first-episode',
   name = 'Slonobass AntennaPod',
-  version = '1.0',
+  version = '1.1',
   author = 'Алёшка',
   minApiVersion = 2,
   testedApiVersion = 5,
-  description = 'При открытии AntennaPod фокус встаёт на первый выпуск в списке новостей на вкладке «Выпуски»: дальше можно сразу идти по выпускам свайпом. На других вкладках, в поиске, в карточке выпуска и в проигрывателе фокус не трогает. В настройках — переключатель «Фокус на первый выпуск», в меню команд — «Перейти к первому выпуску».',
+  description = 'При открытии AntennaPod фокус встаёт на первый выпуск в списке новостей на вкладке «Выпуски»: дальше можно сразу идти по выпускам свайпом. Кнопки «Отметить как прочитанное» и «Отметить как проигранное» убраны из свайпа, обход идёт только по выпускам. На других вкладках, в поиске, в карточке выпуска и в проигрывателе фокус не трогает. В настройках — переключатели «Фокус на первый выпуск» и «Скрывать кнопку отметки», в меню команд — «Перейти к первому выпуску».',
   apps = { 'de.danoeh.antennapod' },
   permissions = { 'screen', 'speech', 'input', 'actions' },
   commands = {
@@ -37,6 +42,13 @@ local manifest = {
       summary = 'При открытии приложения фокус встаёт на первый выпуск в списке новостей',
       default = true,
     },
+    {
+      key = 'hideMarkRead',
+      type = 'switch',
+      title = 'Скрывать кнопку отметки',
+      summary = 'Кнопки «Отметить как прочитанное» и «Отметить как проигранное» уходят из свайпа, обход идёт только по выпускам',
+      default = true,
+    },
   },
 }
 
@@ -44,6 +56,54 @@ local LIST_ID = 'recyclerView'
 local CONTAINER_ID = 'overview_coordinator_layout'
 local EPISODES_TAB_ID = 'bottom_navigation_episodes'
 local DATE_ID = 'txtvPubDate'
+local ACTION_ID = 'secondaryActionButton'
+
+-- Подписи кнопки отметки: у выпуска без звука — «прочитанное», со звуком —
+-- «проигранное». Английские варианты — на случай другой локали приложения.
+local MARK_LABELS = {
+  'Отметить как прочитанное',
+  'Отметить как проигранное',
+  'Mark as read',
+  'Mark as played',
+}
+
+-- ── Правила ──
+
+-- Кнопка отметки у строки выпуска кликабельна, но не фокусируема; SandFly
+-- всё равно может ставить на неё фокус при свайпе. hide = true убирает её
+-- из обхода, но оставляет в дереве — ручное нажатие по-прежнему работает.
+local ruleIds = {}
+
+local function clearRules()
+  for i = 1, #ruleIds do
+    pcall(sf.rules.remove, ruleIds[i])
+  end
+  ruleIds = {}
+end
+
+local function addRule(rule)
+  local ok, number = pcall(sf.rules.add, rule)
+  if ok and number then
+    ruleIds[#ruleIds + 1] = number
+  end
+end
+
+local function applyRules()
+  clearRules()
+  if sf.settings.get('hideMarkRead') == false then
+    return
+  end
+  for _, label in ipairs(MARK_LABELS) do
+    addRule({
+      match = {
+        id = ACTION_ID,
+        contentDescription = label,
+        inside = { id = LIST_ID },
+      },
+      hide = true,
+    })
+  end
+end
 
 -- ── Экран выпусков ──
 
@@ -243,6 +303,7 @@ end
 
 sf.onAppEnter(function()
   generation = generation + 1
+  applyRules()
   maybeFocus(true)
 end)
 
@@ -282,4 +343,14 @@ sf.onCommand('focus_first_episode', function()
   end
 end)
 
-print('AntennaPod: фокус на первый выпуск, версия 1.0 загружена')
+sf.onSettingChange(function(key)
+  if key == 'hideMarkRead' then
+    applyRules()
+  end
+end)
+
+-- Правила ставим сразу при загрузке: скрипт грузится, когда приложение выходит
+-- вперёд.
+applyRules()
+
+print('AntennaPod: фокус на первый выпуск, кнопка отметки убрана из свайпа, версия 1.1 загружена')
